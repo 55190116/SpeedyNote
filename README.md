@@ -12,7 +12,9 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20iPadOS-brightgreen)]()
 [![Qt](https://img.shields.io/badge/Qt-6.x-41CD52?logo=qt)]()
 
-[![Get it on Flathub](https://flathub.org/assets/badges/flathub-badge-i-en.png)](https://flathub.org/en/apps/org.speedynote.SpeedyNote)
+<a href="https://flathub.org/en/apps/org.speedynote.SpeedyNote"><img src="https://flathub.org/assets/badges/flathub-badge-i-en.png" alt="Get it on Flathub" height="54"></a>
+&nbsp;&nbsp;
+<a href="https://hellogithub.com/repository/alpha-liu-01/SpeedyNote"><img src="https://abroad.hellogithub.com/v1/widgets/recommend.svg?rid=e86680d007424ab59d68d5e787ad5c12&claim_uid=e5oCIWstjbEUv9D" alt="Featured｜HelloGitHub" height="54"></a>
 
 [English](#features) • [中文](./docs/zh_Hans/README_zh_Hans.md)
 

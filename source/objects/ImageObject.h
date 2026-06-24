@@ -179,4 +179,14 @@ public:
     
 private:
     QPixmap cachedPixmap;  ///< Cached pixmap for rendering
+
+    /**
+     * @brief Transient flag: true once the asset PNG is confirmed on disk.
+     *
+     * NOT serialized. Set by saveToAssets() (after the file is written or its
+     * existence is confirmed) and by loadImage() (the file it just read exists).
+     * While false, toJson() embeds a base64 recovery copy so the pixels are
+     * never left as a dangling reference if the asset later goes missing.
+     */
+    bool m_assetPersisted = false;
 };
