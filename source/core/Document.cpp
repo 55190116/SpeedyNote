@@ -2020,9 +2020,36 @@ int Document::saveUnsavedImages(const QString& bundlePath)
         if (!page) return;
         
         for (auto& obj : page->objects) {
-            // Only process objects with loaded assets that might need saving
-            // isAssetLoaded() returns false for objects without external assets (base class)
-            // For ImageObject, it returns !cachedPixmap.isNull()
+            // Images: data-integrity guard. As long as we still hold the
+            // pixels, guarantee the referenced asset actually exists on disk.
+            // This (re)writes a missing asset whether imagePath is empty (never
+            // saved) or set but the file is absent (lost / copied object), so a
+            // page JSON is never written with a dangling reference.
+            // saveAssets()/saveToAssets() deduplicates, so this is a no-op when
+            // the file is already present.
+            if (auto* img = dynamic_cast<ImageObject*>(obj.get())) {
+                if (img->isLoaded()) {
+                    bool needsWrite = img->imagePath.isEmpty() ||
+                        !QFile::exists(img->fullPath(bundlePath));
+                    if (img->saveAssets(bundlePath)) {
+                        if (needsWrite) {
+                            savedCount++;
+                            if (!img->imagePath.isEmpty()) {
+                                qWarning() << "saveUnsavedImages: wrote missing asset"
+                                           << img->imagePath << "for object" << img->id;
+                            }
+                        }
+                    } else {
+                        qWarning() << "saveUnsavedImages: Failed to save asset for"
+                                   << img->type() << "object" << img->id;
+                    }
+                }
+                continue;
+            }
+
+            // Other asset-bearing object types: existing virtual path.
+            // isAssetLoaded() returns false for objects without external assets
+            // (base class), so this no-ops for plain objects.
             if (obj->isAssetLoaded()) {
                 // saveAssets() handles deduplication internally - safe to call even
                 // if asset was previously saved (just updates imagePath if needed)
@@ -2075,7 +2102,13 @@ void Document::cleanupOrphanedAssets()
     
     // Step 1: Collect all referenced image filenames
     QSet<QString> referencedFiles;
-    
+
+    // Fail-safe guard: if we cannot fully enumerate every page/tile's image
+    // references (e.g. a page JSON is locked or corrupt), we must NOT delete
+    // anything - an incomplete reference set previously caused in-use assets to
+    // be deleted as "orphans", silently losing inserted images.
+    bool incompleteScan = false;
+
     // Helper to scan a page's objects for image references
     auto collectFromPage = [&](Page* p) {
         if (!p) return;
@@ -2107,11 +2140,24 @@ void Document::cleanupOrphanedAssets()
             QString tilePath = m_bundlePath + "/tiles/" +
                 QString("%1,%2.json").arg(coord.first).arg(coord.second);
             QFile file(tilePath);
-            if (!file.open(QIODevice::ReadOnly))
+            if (!file.open(QIODevice::ReadOnly)) {
+                qWarning() << "cleanupOrphanedAssets: cannot open tile" << tilePath
+                           << "- skipping asset cleanup to avoid data loss";
+                incompleteScan = true;
                 continue;
+            }
 
-            QJsonObject tileObj = QJsonDocument::fromJson(file.readAll()).object();
+            QJsonParseError parseError;
+            QJsonDocument tileDoc = QJsonDocument::fromJson(file.readAll(), &parseError);
             file.close();
+            if (parseError.error != QJsonParseError::NoError) {
+                qWarning() << "cleanupOrphanedAssets: parse error in tile" << tilePath
+                           << parseError.errorString()
+                           << "- skipping asset cleanup to avoid data loss";
+                incompleteScan = true;
+                continue;
+            }
+            QJsonObject tileObj = tileDoc.object();
 
             QJsonArray objects = tileObj["objects"].toArray();
             for (const auto& val : objects) {
@@ -2124,20 +2170,65 @@ void Document::cleanupOrphanedAssets()
             }
         }
     } else {
-        // Paged mode: scan all pages
-        // 
-        // PERF NOTE: For lazy-loaded mode, page(i) loads pages on demand.
-        // This means cleanup will load ALL pages into memory for large documents.
-        // This is intentional: we need to scan all pages to avoid deleting
-        // images that are still referenced by unloaded pages.
-        // 
-        // This only runs on document close, so the memory usage is temporary.
-        // Future optimization: track image references in manifest to avoid
-        // loading all pages.
-        for (int i = 0; i < pageCount(); i++) {
-            Page* p = page(i);
-            collectFromPage(p);
+        // Paged mode: scan every page for image references.
+        //
+        // Loaded pages are scanned in memory (authoritative - may carry
+        // imagePath changes not yet flushed to disk). Evicted pages are read
+        // directly from their JSON file: this avoids mass-loading every page
+        // into memory at close, and - critically - lets us detect a failed
+        // read so we can abort deletion instead of dropping references and
+        // deleting in-use assets (the cause of the silent image-loss bug).
+        QString pagesDir = m_bundlePath + "/pages";
+        for (const QString& uuid : m_pageOrder) {
+            auto loadedIt = m_loadedPages.find(uuid);
+            if (loadedIt != m_loadedPages.end()) {
+                collectFromPage(loadedIt->second.get());
+                continue;
+            }
+
+            QString pagePath = pagesDir + "/" + uuid + ".json";
+            QFile file(pagePath);
+            if (!file.exists()) {
+                // Pristine PDF pages legitimately have no JSON file (they are
+                // synthesized on load). Any other absent page carries no image
+                // references, so there is nothing to collect or lose.
+                continue;
+            }
+            if (!file.open(QIODevice::ReadOnly)) {
+                qWarning() << "cleanupOrphanedAssets: cannot open page" << pagePath
+                           << "- skipping asset cleanup to avoid data loss";
+                incompleteScan = true;
+                continue;
+            }
+
+            QJsonParseError parseError;
+            QJsonDocument jsonDoc = QJsonDocument::fromJson(file.readAll(), &parseError);
+            file.close();
+            if (parseError.error != QJsonParseError::NoError) {
+                qWarning() << "cleanupOrphanedAssets: parse error in page" << pagePath
+                           << parseError.errorString()
+                           << "- skipping asset cleanup to avoid data loss";
+                incompleteScan = true;
+                continue;
+            }
+
+            QJsonArray objects = jsonDoc.object()["objects"].toArray();
+            for (const auto& val : objects) {
+                QJsonObject obj = val.toObject();
+                if (obj["type"].toString() == QLatin1String("image")) {
+                    QString path = obj["imagePath"].toString();
+                    if (!path.isEmpty())
+                        referencedFiles.insert(path);
+                }
+            }
         }
+    }
+
+    // Fail-safe: never delete from an incomplete reference set.
+    if (incompleteScan) {
+        qWarning() << "cleanupOrphanedAssets: reference scan incomplete -"
+                   << "skipping orphan deletion to protect in-use assets";
+        return;
     }
     
     // Step 3: List files on disk and delete orphans

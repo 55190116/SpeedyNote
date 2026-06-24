@@ -9,13 +9,14 @@
 #include <QDir>
 #include <QCryptographicHash>
 #include <QBuffer>
+#include <QPainter>
 
 void ImageObject::render(QPainter& painter, qreal zoom) const
 {
-    if (!visible || cachedPixmap.isNull()) {
+    if (!visible) {
         return;
     }
-    
+
     // Calculate the target rectangle at the given zoom level
     QRectF targetRect(
         position.x() * zoom,
@@ -23,7 +24,33 @@ void ImageObject::render(QPainter& painter, qreal zoom) const
         size.width() * zoom,
         size.height() * zoom
     );
-    
+
+    if (cachedPixmap.isNull()) {
+        // The asset failed to load (file missing / unreadable). Draw a visible
+        // "missing image" placeholder instead of nothing, so the user can see
+        // which image is broken. The object and its imagePath are preserved,
+        // so the reference can still be re-linked if the file reappears.
+        if (imagePath.isEmpty() || targetRect.isEmpty()) {
+            return;
+        }
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        const QColor border(180, 60, 60);
+        painter.fillRect(targetRect, QColor(245, 230, 230));
+        QPen pen(border);
+        pen.setWidthF(qMax(1.0, zoom));
+        painter.setPen(pen);
+        painter.drawRect(targetRect);
+        // Diagonal cross signals a broken/missing image.
+        painter.drawLine(targetRect.topLeft(), targetRect.bottomRight());
+        painter.drawLine(targetRect.topRight(), targetRect.bottomLeft());
+        if (targetRect.width() > 60.0 && targetRect.height() > 24.0) {
+            painter.drawText(targetRect, Qt::AlignCenter, QStringLiteral("Missing image"));
+        }
+        painter.restore();
+        return;
+    }
+
     QRectF sourceRect(cachedPixmap.rect());
 
     if (rotation != 0.0) {
@@ -56,9 +83,12 @@ QJsonObject ImageObject::toJson() const
     obj["maintainAspectRatio"] = maintainAspectRatio;
     obj["originalAspectRatio"] = originalAspectRatio;
     
-    // BF.7: If imagePath is empty but we have a cached pixmap (unsaved document),
-    // embed the image data as base64 so undo/redo works correctly
-    if (imagePath.isEmpty() && !cachedPixmap.isNull()) {
+    // BF.7 / data-safety: embed the image data as base64 whenever the asset is
+    // not confirmed on disk. This covers unsaved documents (imagePath empty, for
+    // undo/redo) AND the case where imagePath is set but the asset file is not
+    // known to exist - so a later orphan cleanup or lost file can never turn the
+    // reference into permanent data loss.
+    if (!cachedPixmap.isNull() && (imagePath.isEmpty() || !m_assetPersisted)) {
         QByteArray imageData;
         QBuffer buffer(&imageData);
         buffer.open(QIODevice::WriteOnly);
@@ -113,7 +143,10 @@ bool ImageObject::loadImage(const QString& basePath)
     
     // Convert to pixmap and cache
     cachedPixmap = QPixmap::fromImage(image);
-    
+
+    // The file we just read exists, so the asset is confirmed persisted.
+    m_assetPersisted = true;
+
     // Update aspect ratio if this is the first load
     if (originalAspectRatio <= 0.0 && !cachedPixmap.isNull() && cachedPixmap.height() > 0) {
         originalAspectRatio = static_cast<qreal>(cachedPixmap.width()) / 
@@ -131,7 +164,10 @@ bool ImageObject::loadImage(const QString& basePath)
 void ImageObject::setPixmap(const QPixmap& pixmap)
 {
     cachedPixmap = pixmap;
-    
+
+    // A freshly supplied pixmap (clipboard/memory) is not yet on disk.
+    m_assetPersisted = false;
+
     if (!cachedPixmap.isNull()) {
         // Update aspect ratio (guard against height=0)
         if (cachedPixmap.height() > 0) {
@@ -239,6 +275,7 @@ bool ImageObject::saveToAssets(const QString& bundlePath)
     if (QFile::exists(fullFilePath)) {
         // Image already saved, just update path
         imagePath = filename;
+        m_assetPersisted = true;
 #ifdef SPEEDYNOTE_DEBUG
         qDebug() << "ImageObject: reusing existing asset" << filename;
 #endif
@@ -259,6 +296,7 @@ bool ImageObject::saveToAssets(const QString& bundlePath)
     
     // Update imagePath to just the filename
     imagePath = filename;
+    m_assetPersisted = true;
     
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "ImageObject: saved to assets" << filename;
