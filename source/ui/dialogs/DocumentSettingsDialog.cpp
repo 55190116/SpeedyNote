@@ -270,17 +270,29 @@ void DocumentSettingsDialog::loadSettings()
 
     // Page size: select the preset matching the document's default page size.
     if (pageSizeCombo) {
+        const QSizeF current = m_doc->defaultPageSize;
         int matchIndex = -1;
         for (int i = 0; i < pageSizeCombo->count(); ++i) {
             QSizeF preset = pageSizeCombo->itemData(i).toSizeF();
-            if (qFuzzyCompare(preset.width(), m_doc->defaultPageSize.width()) &&
-                qFuzzyCompare(preset.height(), m_doc->defaultPageSize.height())) {
+            if (qFuzzyCompare(preset.width(), current.width()) &&
+                qFuzzyCompare(preset.height(), current.height())) {
                 matchIndex = i;
                 break;
             }
         }
         if (matchIndex >= 0) {
             pageSizeCombo->setCurrentIndex(matchIndex);
+        } else if (current.isValid() && !current.isEmpty()) {
+            // No preset matches (e.g. a PDF-imported document with an arbitrary
+            // page size). Insert a "Custom" entry holding the real size and
+            // select it, so applying the dialog does NOT silently overwrite the
+            // document's page size with the first preset.
+            pageSizeCombo->insertItem(0,
+                tr("Custom (%1 × %2 px)")
+                    .arg(static_cast<int>(current.width()))
+                    .arg(static_cast<int>(current.height())),
+                current);
+            pageSizeCombo->setCurrentIndex(0);
         }
         // Ensure the dimensions label reflects the current selection even when
         // the current size is custom (no matching preset).
@@ -300,16 +312,25 @@ void DocumentSettingsDialog::applyChanges()
 
     // Page size override (option b): update the document default so newly added
     // pages (Ctrl+Shift+A) use it. Existing pages are intentionally NOT resized.
+    // Only write (and dirty the document) when the size actually changed, so a
+    // user who only edits the OCR language doesn't spuriously mark it modified.
     if (pageSizeCombo) {
         QSizeF selected = pageSizeCombo->currentData().toSizeF();
-        if (selected.isValid() && !selected.isEmpty()) {
+        if (selected.isValid() && !selected.isEmpty() &&
+            (!qFuzzyCompare(selected.width(), m_doc->defaultPageSize.width()) ||
+             !qFuzzyCompare(selected.height(), m_doc->defaultPageSize.height()))) {
             m_doc->defaultPageSize = selected;
             m_doc->markModified();
         }
     }
 
-    // OCR language override (marks modified + refreshes the OCR worker).
+    // OCR language override (marks modified + refreshes the OCR worker). Only
+    // apply when it actually changed, so opening the dialog and pressing OK
+    // without touching this tab doesn't dirty the document or churn the worker.
     if (ocrLanguageCombo && mainWindowRef) {
-        mainWindowRef->applyDocumentOcrLanguage(m_doc, ocrLanguageCombo->currentData().toString());
+        const QString selectedLang = ocrLanguageCombo->currentData().toString();
+        if (selectedLang != m_doc->ocrLanguage) {
+            mainWindowRef->applyDocumentOcrLanguage(m_doc, selectedLang);
+        }
     }
 }
