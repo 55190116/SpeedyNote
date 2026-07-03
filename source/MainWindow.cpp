@@ -122,6 +122,7 @@
 #endif // Q_OS_ANDROID / Q_OS_IOS
 // #include "HandwritingLineEdit.h"
 #include "ControlPanelDialog.h"  // Phase CP.1: Re-enabled with cleaned up tabs
+#include "ui/dialogs/DocumentSettingsDialog.h"  // Per-document override panel
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
 #include "SDLControllerManager.h"
 #endif
@@ -1082,12 +1083,15 @@ void MainWindow::setupUi() {
     
     overflowMenu->addSeparator();
 
-    // MAC.6 review fix: pre-MAC.6 this wrapped showOcrLanguageDialog() in a
-    // no-arg lambda because the slot was private. After MAC.6 promoted it to
-    // private slots: (so MacMenuBar can invokeMethod it), the direct PMF
-    // connect works and matches the lockAllOcrAction pattern below.
-    QAction *ocrLanguageAction = overflowMenu->addAction(tr("OCR Language..."));
-    connect(ocrLanguageAction, &QAction::triggered, this, &MainWindow::showOcrLanguageDialog);
+    // Per-document override panel. Replaces the standalone "OCR Language..."
+    // item; the OCR language override now lives in its Language tab. The macOS
+    // menu still opens showOcrLanguageDialog() directly (see MacMenuBar).
+    QAction *docSettingsAction = overflowMenu->addAction(tr("Current Document Settings..."));
+    connect(docSettingsAction, &QAction::triggered, this, [this]() {
+        DocumentViewport* vp = currentViewport();
+        DocumentSettingsDialog dlg(this, vp ? vp->document() : nullptr, this);
+        dlg.exec();
+    });
 
     // MAC.6: body extracted to MainWindow::lockAllOcrText() so the macOS OCR
     // menu (which can't access this private inline lambda) shares one
@@ -6806,10 +6810,13 @@ void MainWindow::showOcrLanguageDialog()
     if (dlg.exec() != QDialog::Accepted)
         return;
 
-    QString chosen = combo->currentData().toString();
+    applyDocumentOcrLanguage(doc, combo->currentData().toString());
+}
 
+void MainWindow::applyDocumentOcrLanguage(Document* doc, const QString& lang)
+{
     if (doc) {
-        doc->ocrLanguage = chosen;
+        doc->ocrLanguage = lang;
         doc->modified = true;
     }
 

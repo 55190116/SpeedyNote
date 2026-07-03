@@ -135,6 +135,11 @@ public:
     // Subset already present locally; the rest need an on-demand download.
     QStringList ocrDownloadedLanguages() const { return m_ocrDownloadedLanguages; }
 
+    // Apply a per-document OCR recognizer language override (empty = global
+    // fallback). Marks the document modified and refreshes the OCR worker.
+    // Shared by showOcrLanguageDialog() and DocumentSettingsDialog.
+    void applyDocumentOcrLanguage(Document* doc, const QString& lang);
+
     // Theme settings
     QColor customAccentColor;
     bool useCustomAccentColor = false;

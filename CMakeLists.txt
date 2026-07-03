@@ -1055,6 +1055,7 @@ set(APP_SOURCES
     source/ui/dialogs/BatchPdfExportDialog.cpp
     source/ui/dialogs/BatchSnbxExportDialog.cpp
     source/ui/dialogs/ExportResultsDialog.cpp
+    source/ui/dialogs/DocumentSettingsDialog.cpp
     source/text/MarkdownNoteEntry.cpp
     source/ui/MarkdownNotesSidebar.cpp
         ${CORE_SOURCES}
