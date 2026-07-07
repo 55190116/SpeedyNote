@@ -43,8 +43,8 @@ DocumentSettingsDialog::DocumentSettingsDialog(MainWindow* mainWindow, Document*
 
     createPageTab();
     createLanguageTab();
-    // Follow-up plan: createToolsTab() (CJK grid-cell mode),
-    //                 createThemeTab() (PDF dark inversion / full-page invert).
+    createThemeTab();
+    // Follow-up plan: createToolsTab() (CJK grid-cell mode).
 
     mainLayout->addWidget(tabWidget);
 
@@ -380,6 +380,96 @@ void DocumentSettingsDialog::createLanguageTab()
 }
 
 // ============================================================================
+// Theme tab - per-document PDF inversion overrides (PDF-backed documents only)
+// ============================================================================
+
+void DocumentSettingsDialog::createThemeTab()
+{
+    themeTab = new QWidget(this);
+    QVBoxLayout* layout = new QVBoxLayout(themeTab);
+
+    layout->addSpacing(6);
+
+    const bool hasPdf = m_doc && m_doc->hasPdfReference();
+
+    QLabel* descLabel = new QLabel(
+        tr("These PDF display settings override the global defaults for THIS "
+           "document only. They apply only to documents with a PDF loaded."),
+        themeTab);
+    descLabel->setWordWrap(true);
+    descLabel->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 10px;");
+    layout->addWidget(descLabel);
+
+    // Invert PDF lightness in dark mode
+    QLabel* darkLabel = new QLabel(tr("Invert PDF Lightness in Dark Mode:"), themeTab);
+    layout->addWidget(darkLabel);
+
+    pdfInvertDarkCombo = new QComboBox(themeTab);
+    pdfInvertDarkCombo->addItem(tr("Use global setting"), -1);
+    pdfInvertDarkCombo->addItem(tr("On"), 1);
+    pdfInvertDarkCombo->addItem(tr("Off"), 0);
+    layout->addWidget(pdfInvertDarkCombo);
+
+    QLabel* darkNote = new QLabel(
+        tr("When enabled and dark mode is active, PDF page backgrounds are darkened "
+           "and their content lightened for comfortable night reading."),
+        themeTab);
+    darkNote->setWordWrap(true);
+    darkNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(darkNote);
+
+    layout->addSpacing(12);
+
+    // Invert entire page including images
+    QLabel* imagesLabel = new QLabel(tr("Invert Entire Page Including Images:"), themeTab);
+    layout->addWidget(imagesLabel);
+
+    pdfInvertImagesCombo = new QComboBox(themeTab);
+    pdfInvertImagesCombo->addItem(tr("Use global setting"), -1);
+    pdfInvertImagesCombo->addItem(tr("On"), 1);
+    pdfInvertImagesCombo->addItem(tr("Off"), 0);
+    layout->addWidget(pdfInvertImagesCombo);
+
+    QLabel* imagesNote = new QLabel(
+        tr("By default, embedded photos and figures are detected and excluded from "
+           "inversion. Enable this to invert the whole page, including images."),
+        themeTab);
+    imagesNote->setWordWrap(true);
+    imagesNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(imagesNote);
+
+    layout->addStretch();
+
+    if (!hasPdf) {
+        QLabel* noPdfNote = new QLabel(
+            tr("This document has no PDF loaded, so these settings have no effect."),
+            themeTab);
+        noPdfNote->setWordWrap(true);
+        noPdfNote->setStyleSheet("color: #b03c3c; font-size: 11px;");
+        layout->addWidget(noPdfNote);
+    }
+
+    // "Invert entire page" only makes sense when lightness inversion isn't
+    // explicitly Off (mirrors the Control Panel dependency).
+    auto updateImagesEnabled = [this, hasPdf]() {
+        if (!pdfInvertImagesCombo || !pdfInvertDarkCombo) return;
+        const bool darkOff = pdfInvertDarkCombo->currentData().toInt() == 0;
+        pdfInvertImagesCombo->setEnabled(hasPdf && !darkOff);
+    };
+    connect(pdfInvertDarkCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [updateImagesEnabled](int) { updateImagesEnabled(); });
+
+    if (!hasPdf) {
+        pdfInvertDarkCombo->setEnabled(false);
+        pdfInvertImagesCombo->setEnabled(false);
+    } else {
+        updateImagesEnabled();
+    }
+
+    tabWidget->addTab(themeTab, tr("Theme"));
+}
+
+// ============================================================================
 // Load / Apply
 // ============================================================================
 
@@ -444,6 +534,16 @@ void DocumentSettingsDialog::loadSettings()
         int idx = ocrLanguageCombo->findData(m_doc->ocrLanguage);
         if (idx >= 0) ocrLanguageCombo->setCurrentIndex(idx);
     }
+
+    // PDF display overrides: pre-select the tri-state values.
+    if (pdfInvertDarkCombo) {
+        int idx = pdfInvertDarkCombo->findData(m_doc->pdfInvertDarkOverride);
+        if (idx >= 0) pdfInvertDarkCombo->setCurrentIndex(idx);
+    }
+    if (pdfInvertImagesCombo) {
+        int idx = pdfInvertImagesCombo->findData(m_doc->pdfInvertIncludeImagesOverride);
+        if (idx >= 0) pdfInvertImagesCombo->setCurrentIndex(idx);
+    }
 }
 
 void DocumentSettingsDialog::applyChanges()
@@ -501,6 +601,26 @@ void DocumentSettingsDialog::applyChanges()
         const QString selectedLang = ocrLanguageCombo->currentData().toString();
         if (selectedLang != m_doc->ocrLanguage) {
             mainWindowRef->applyDocumentOcrLanguage(m_doc, selectedLang);
+        }
+    }
+
+    // PDF display overrides (tri-state: -1 inherit / 0 off / 1 on). Apply only on
+    // change, then re-resolve + push to the viewport(s) showing this document.
+    if (pdfInvertDarkCombo && pdfInvertImagesCombo && mainWindowRef) {
+        const int darkVal = pdfInvertDarkCombo->currentData().toInt();
+        const int imagesVal = pdfInvertImagesCombo->currentData().toInt();
+        bool changed = false;
+        if (darkVal != m_doc->pdfInvertDarkOverride) {
+            m_doc->pdfInvertDarkOverride = darkVal;
+            changed = true;
+        }
+        if (imagesVal != m_doc->pdfInvertIncludeImagesOverride) {
+            m_doc->pdfInvertIncludeImagesOverride = imagesVal;
+            changed = true;
+        }
+        if (changed) {
+            m_doc->markModified();
+            mainWindowRef->refreshPdfDisplaySettingsForDocument(m_doc);
         }
     }
 }

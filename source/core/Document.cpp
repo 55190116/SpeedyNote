@@ -1445,6 +1445,12 @@ QJsonObject Document::toJson() const
         obj["ocr_language"] = ocrLanguage;
     if (ocrSnapToBackground)
         obj["ocr_snap_to_background"] = true;
+
+    // PDF display overrides (written only when overridden; absent = inherit global)
+    if (pdfInvertDarkOverride >= 0)
+        obj["pdf_invert_dark"] = (pdfInvertDarkOverride == 1);
+    if (pdfInvertIncludeImagesOverride >= 0)
+        obj["pdf_invert_include_images"] = (pdfInvertIncludeImagesOverride == 1);
     
     // Page count (for quick info without loading pages)
     obj["page_count"] = pageCount();
@@ -1508,6 +1514,12 @@ std::unique_ptr<Document> Document::fromJson(const QJsonObject& obj)
     // OCR settings
     doc->ocrLanguage = obj["ocr_language"].toString();
     doc->ocrSnapToBackground = obj["ocr_snap_to_background"].toBool(false);
+
+    // PDF display overrides (absent key = inherit global, stored as -1)
+    doc->pdfInvertDarkOverride = obj.contains("pdf_invert_dark")
+        ? (obj["pdf_invert_dark"].toBool() ? 1 : 0) : -1;
+    doc->pdfInvertIncludeImagesOverride = obj.contains("pdf_invert_include_images")
+        ? (obj["pdf_invert_include_images"].toBool() ? 1 : 0) : -1;
     
     // Note: Pages are NOT loaded here - call loadPagesFromJson() separately
     // or use fromFullJson() to load everything

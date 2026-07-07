@@ -90,9 +90,14 @@ private:
     QComboBox* ocrLanguageCombo = nullptr;
     void createLanguageTab();
 
+    // === Theme tab (PDF-backed documents only) ===
+    QWidget* themeTab = nullptr;
+    QComboBox* pdfInvertDarkCombo = nullptr;
+    QComboBox* pdfInvertImagesCombo = nullptr;
+    void createThemeTab();
+
     // === Future override tabs (follow-up plan) ===
     // void createToolsTab();   // CJK grid-cell mode
-    // void createThemeTab();   // PDF dark inversion / full-page invert
 
     void loadSettings();
 };

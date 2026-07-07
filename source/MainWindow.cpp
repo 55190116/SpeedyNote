@@ -378,9 +378,9 @@ MainWindow::MainWindow(QWidget *parent)
         // Sync viewport dark mode with current theme
         if (vp) {
             vp->setDarkMode(isDarkMode());
-            QSettings s("SpeedyNote", "App");
-            vp->setPdfDarkModeEnabled(s.value("display/pdfDarkMode", true).toBool());
-            vp->setSkipImageMasking(s.value("display/skipImageMasking", false).toBool());
+            // Resolve per-document overrides (falls back to global QSettings).
+            vp->setPdfDarkModeEnabled(resolvePdfDarkMode(vp->document()));
+            vp->setSkipImageMasking(resolvePdfInvertIncludeImages(vp->document()));
         }
         
         // Phase 5.1 Task 4: Update LayerPanel when tab changes
@@ -4715,25 +4715,68 @@ QColor MainWindow::getDefaultPenColor() {
     return isDarkMode() ? Qt::white : Qt::black;
 }
 
-void MainWindow::setPdfDarkModeEnabled(bool enabled) {
+void MainWindow::setPdfDarkModeEnabled(bool /*enabled*/) {
+    // The new global value is already persisted to QSettings by the caller. Push
+    // the RESOLVED value per viewport so documents with a per-document override
+    // keep it, while "inherit" documents follow the new global.
     if (m_splitViewManager) {
         m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
             for (int i = 0; i < tm->tabCount(); ++i) {
                 if (DocumentViewport* vp = tm->viewportAt(i))
-                    vp->setPdfDarkModeEnabled(enabled);
+                    vp->setPdfDarkModeEnabled(resolvePdfDarkMode(vp->document()));
             }
         });
     }
 }
 
-void MainWindow::setSkipImageMasking(bool skip) {
+void MainWindow::setSkipImageMasking(bool /*skip*/) {
+    // See setPdfDarkModeEnabled: resolve per document so overrides are preserved.
     if (m_splitViewManager) {
         m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
             for (int i = 0; i < tm->tabCount(); ++i) {
                 if (DocumentViewport* vp = tm->viewportAt(i))
-                    vp->setSkipImageMasking(skip);
+                    vp->setSkipImageMasking(resolvePdfInvertIncludeImages(vp->document()));
             }
         });
+    }
+}
+
+bool MainWindow::resolvePdfDarkMode(Document* doc) const {
+    if (doc && doc->pdfInvertDarkOverride >= 0)
+        return doc->pdfInvertDarkOverride == 1;
+    return QSettings("SpeedyNote", "App").value("display/pdfDarkMode", true).toBool();
+}
+
+bool MainWindow::resolvePdfInvertIncludeImages(Document* doc) const {
+    if (doc && doc->pdfInvertIncludeImagesOverride >= 0)
+        return doc->pdfInvertIncludeImagesOverride == 1;
+    return QSettings("SpeedyNote", "App").value("display/skipImageMasking", false).toBool();
+}
+
+void MainWindow::refreshPdfDisplaySettingsForDocument(Document* doc) {
+    if (!doc || !m_splitViewManager) return;
+    const bool darkInvert = resolvePdfDarkMode(doc);
+    const bool includeImages = resolvePdfInvertIncludeImages(doc);
+    m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+        for (int i = 0; i < tm->tabCount(); ++i) {
+            DocumentViewport* vp = tm->viewportAt(i);
+            if (vp && vp->document() == doc) {
+                vp->setPdfDarkModeEnabled(darkInvert);
+                vp->setSkipImageMasking(includeImages);
+                vp->update();
+            }
+        }
+    });
+    // Keep the current-document thumbnails in sync when it's the active doc.
+    // setPdfDarkMode only updates the renderer flag, so invalidate the cache to
+    // force a re-render (otherwise thumbnails keep the old inversion until they
+    // happen to regenerate).
+    if (m_pagePanel) {
+        DocumentViewport* cur = currentViewport();
+        if (cur && cur->document() == doc) {
+            m_pagePanel->setPdfDarkMode(isDarkMode() && darkInvert);
+            m_pagePanel->invalidateAllThumbnails();
+        }
     }
 }
 
@@ -4863,17 +4906,15 @@ void MainWindow::updateTheme() {
         m_splitViewManager->updateTheme(darkMode, accentColor);
     }
     
-    // Update all DocumentViewports across both panes
+    // Update all DocumentViewports across both panes (resolve per-document
+    // PDF display overrides; falls back to global QSettings).
     if (m_splitViewManager) {
-        QSettings s("SpeedyNote", "App");
-        bool pdfDarkMode = s.value("display/pdfDarkMode", true).toBool();
-        bool skipMasking = s.value("display/skipImageMasking", false).toBool();
         m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
             for (int i = 0; i < tm->tabCount(); ++i) {
                 if (DocumentViewport* vp = tm->viewportAt(i)) {
                     vp->setDarkMode(darkMode);
-                    vp->setPdfDarkModeEnabled(pdfDarkMode);
-                    vp->setSkipImageMasking(skipMasking);
+                    vp->setPdfDarkModeEnabled(resolvePdfDarkMode(vp->document()));
+                    vp->setSkipImageMasking(resolvePdfInvertIncludeImages(vp->document()));
                 }
             }
         });
@@ -4894,10 +4935,11 @@ void MainWindow::updateTheme() {
         m_floatingTextEditor->setDarkMode(darkMode);
     }
 
-    // Sync thumbnail renderer dark mode state
+    // Sync thumbnail renderer dark mode state (respect the current document's
+    // PDF inversion override).
     if (m_pagePanel) {
-        QSettings s("SpeedyNote", "App");
-        bool pdfDarkMode = darkMode && s.value("display/pdfDarkMode", true).toBool();
+        DocumentViewport* vp = currentViewport();
+        bool pdfDarkMode = darkMode && resolvePdfDarkMode(vp ? vp->document() : nullptr);
         m_pagePanel->setPdfDarkMode(pdfDarkMode);
     }
     
