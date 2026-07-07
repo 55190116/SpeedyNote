@@ -6,6 +6,8 @@
 #include <QComboBox>
 #include <QLabel>
 #include <QPushButton>
+#include <QSpinBox>
+#include <QColor>
 
 // Forward declarations
 class MainWindow;
@@ -51,6 +53,8 @@ protected:
 private slots:
     void applyChanges();
     void onPageSizePresetChanged(int index);
+    void chooseBackgroundColor();
+    void chooseGridColor();
 
 private:
     MainWindow* mainWindowRef = nullptr;
@@ -66,6 +70,19 @@ private:
     QWidget* pageTab = nullptr;
     QComboBox* pageSizeCombo = nullptr;
     QLabel* pageSizeDimLabel = nullptr;
+    // Background section (applies document-wide, not just to new pages).
+    QComboBox* bgStyleCombo = nullptr;
+    QPushButton* bgColorButton = nullptr;
+    QPushButton* gridColorButton = nullptr;
+    QSpinBox* gridSpacingSpin = nullptr;
+    QSpinBox* lineSpacingSpin = nullptr;
+    QColor selectedBgColor;
+    QColor selectedGridColor;
+    // The document's background type at load time (as Page::BackgroundType int).
+    // Used to preserve a non-listed type (PDF/Custom) on apply so editing only
+    // colour/spacing never silently rewrites it to "None".
+    int loadedBgTypeValue = 0;
+    bool bgTypeInCombo = true;
     void createPageTab();
 
     // === Language tab ===

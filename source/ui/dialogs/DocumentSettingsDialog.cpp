@@ -1,11 +1,14 @@
 #include "DocumentSettingsDialog.h"
 #include "../../MainWindow.h"
 #include "../../core/Document.h"
+#include "../../core/Page.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QComboBox>
+#include <QSpinBox>
+#include <QColorDialog>
 #include <QCompleter>
 #include <QLocale>
 #include <QSizeF>
@@ -112,11 +115,17 @@ void DocumentSettingsDialog::createPageTab()
 
     QLabel* descLabel = new QLabel(
         tr("These settings override the defaults for THIS document only. "
-           "Page size applies to newly added pages; existing pages are not resized."),
+           "Page size applies to newly added pages (existing pages are not "
+           "resized), while background changes apply to the whole document."),
         pageTab);
     descLabel->setWordWrap(true);
     descLabel->setStyleSheet("color: gray; font-size: 11px; margin-bottom: 10px;");
     layout->addWidget(descLabel);
+
+    // ========== PAGE SIZE SECTION (new pages only) ==========
+    QLabel* pageSectionLabel = new QLabel(tr("Page Size (new pages only)"), pageTab);
+    pageSectionLabel->setStyleSheet("font-weight: bold; margin-top: 5px;");
+    layout->addWidget(pageSectionLabel);
 
     // Paper size preset (same presets as the base Control Panel).
     QHBoxLayout* pageSizeLayout = new QHBoxLayout();
@@ -152,13 +161,123 @@ void DocumentSettingsDialog::createPageTab()
     pageDimLayout->addStretch();
     layout->addLayout(pageDimLayout);
 
+    layout->addSpacing(15);
+
+    // ========== BACKGROUND SECTION (whole document) ==========
+    QLabel* bgSectionLabel = new QLabel(tr("Background (entire document)"), pageTab);
+    bgSectionLabel->setStyleSheet("font-weight: bold;");
+    layout->addWidget(bgSectionLabel);
+
+    // Background style
+    QHBoxLayout* styleLayout = new QHBoxLayout();
+    QLabel* styleLabel = new QLabel(tr("Background Style:"), pageTab);
+    styleLabel->setMinimumWidth(120);
+    styleLayout->addWidget(styleLabel);
+
+    bgStyleCombo = new QComboBox(pageTab);
+    // Values must match Page::BackgroundType enum: None=0, Grid=3, Lines=4.
+    bgStyleCombo->addItem(tr("None"), static_cast<int>(Page::BackgroundType::None));
+    bgStyleCombo->addItem(tr("Grid"), static_cast<int>(Page::BackgroundType::Grid));
+    bgStyleCombo->addItem(tr("Lines"), static_cast<int>(Page::BackgroundType::Lines));
+    styleLayout->addWidget(bgStyleCombo, 1);
+    layout->addLayout(styleLayout);
+
+    layout->addSpacing(10);
+
+    // Background color
+    QHBoxLayout* bgColorLayout = new QHBoxLayout();
+    QLabel* bgColorLabel = new QLabel(tr("Background Color:"), pageTab);
+    bgColorLabel->setMinimumWidth(120);
+    bgColorLayout->addWidget(bgColorLabel);
+
+    bgColorButton = new QPushButton(pageTab);
+    bgColorButton->setFixedSize(100, 30);
+    bgColorButton->setStyleSheet("background-color: #ffffff");
+    connect(bgColorButton, &QPushButton::clicked, this, &DocumentSettingsDialog::chooseBackgroundColor);
+    bgColorLayout->addWidget(bgColorButton);
+    bgColorLayout->addStretch();
+    layout->addLayout(bgColorLayout);
+
+    // Grid/line color
+    QHBoxLayout* gridColorLayout = new QHBoxLayout();
+    QLabel* gridColorLabel = new QLabel(tr("Grid/Line Color:"), pageTab);
+    gridColorLabel->setMinimumWidth(120);
+    gridColorLayout->addWidget(gridColorLabel);
+
+    gridColorButton = new QPushButton(pageTab);
+    gridColorButton->setFixedSize(100, 30);
+    gridColorButton->setStyleSheet("background-color: #c8c8c8");
+    connect(gridColorButton, &QPushButton::clicked, this, &DocumentSettingsDialog::chooseGridColor);
+    gridColorLayout->addWidget(gridColorButton);
+    gridColorLayout->addStretch();
+    layout->addLayout(gridColorLayout);
+
+    layout->addSpacing(10);
+
+    // Grid spacing
+    QHBoxLayout* gridSpacingLayout = new QHBoxLayout();
+    QLabel* gridSpacingLabel = new QLabel(tr("Grid Spacing:"), pageTab);
+    gridSpacingLabel->setMinimumWidth(120);
+    gridSpacingLayout->addWidget(gridSpacingLabel);
+
+    gridSpacingSpin = new QSpinBox(pageTab);
+    gridSpacingSpin->setRange(8, 128);
+    gridSpacingSpin->setSingleStep(8);
+    gridSpacingSpin->setSuffix(" px");
+    gridSpacingSpin->setValue(32);
+    gridSpacingLayout->addWidget(gridSpacingSpin);
+    gridSpacingLayout->addStretch();
+    layout->addLayout(gridSpacingLayout);
+
+    // Line spacing
+    QHBoxLayout* lineSpacingLayout = new QHBoxLayout();
+    QLabel* lineSpacingLabel = new QLabel(tr("Line Spacing:"), pageTab);
+    lineSpacingLabel->setMinimumWidth(120);
+    lineSpacingLayout->addWidget(lineSpacingLabel);
+
+    lineSpacingSpin = new QSpinBox(pageTab);
+    lineSpacingSpin->setRange(8, 128);
+    lineSpacingSpin->setSingleStep(8);
+    lineSpacingSpin->setSuffix(" px");
+    lineSpacingSpin->setValue(32);
+    lineSpacingLayout->addWidget(lineSpacingSpin);
+    lineSpacingLayout->addStretch();
+    layout->addLayout(lineSpacingLayout);
+
     layout->addStretch();
+
+    // Initialize swatch colours (overwritten by loadSettings() when a doc exists).
+    selectedBgColor = QColor("#ffffff");
+    selectedGridColor = QColor("#c8c8c8");
 
     if (!m_doc) {
         pageSizeCombo->setEnabled(false);
+        bgStyleCombo->setEnabled(false);
+        bgColorButton->setEnabled(false);
+        gridColorButton->setEnabled(false);
+        gridSpacingSpin->setEnabled(false);
+        lineSpacingSpin->setEnabled(false);
     }
 
     tabWidget->addTab(pageTab, tr("Page"));
+}
+
+void DocumentSettingsDialog::chooseBackgroundColor()
+{
+    QColor chosen = QColorDialog::getColor(selectedBgColor, this, tr("Select Background Color"));
+    if (chosen.isValid()) {
+        selectedBgColor = chosen;
+        bgColorButton->setStyleSheet(QString("background-color: %1").arg(selectedBgColor.name()));
+    }
+}
+
+void DocumentSettingsDialog::chooseGridColor()
+{
+    QColor chosen = QColorDialog::getColor(selectedGridColor, this, tr("Select Grid/Line Color"));
+    if (chosen.isValid()) {
+        selectedGridColor = chosen;
+        gridColorButton->setStyleSheet(QString("background-color: %1").arg(selectedGridColor.name()));
+    }
 }
 
 void DocumentSettingsDialog::onPageSizePresetChanged(int index)
@@ -299,6 +418,27 @@ void DocumentSettingsDialog::loadSettings()
         onPageSizePresetChanged(pageSizeCombo->currentIndex());
     }
 
+    // Background: prefill from the document's current document-wide defaults.
+    loadedBgTypeValue = static_cast<int>(m_doc->defaultBackgroundType);
+    if (bgStyleCombo) {
+        int styleIdx = bgStyleCombo->findData(loadedBgTypeValue);
+        // findData returns -1 for a PDF/Custom-typed default (no combo entry,
+        // matching the Control Panel which never lists them); display None but
+        // remember it wasn't listed so applyChanges() preserves the real type.
+        bgTypeInCombo = (styleIdx >= 0);
+        bgStyleCombo->setCurrentIndex(bgTypeInCombo ? styleIdx : 0);
+    }
+    if (bgColorButton) {
+        selectedBgColor = m_doc->defaultBackgroundColor;
+        bgColorButton->setStyleSheet(QString("background-color: %1").arg(selectedBgColor.name()));
+    }
+    if (gridColorButton) {
+        selectedGridColor = m_doc->defaultGridColor;
+        gridColorButton->setStyleSheet(QString("background-color: %1").arg(selectedGridColor.name()));
+    }
+    if (gridSpacingSpin) gridSpacingSpin->setValue(m_doc->defaultGridSpacing);
+    if (lineSpacingSpin) lineSpacingSpin->setValue(m_doc->defaultLineSpacing);
+
     // OCR language: pre-select the document's per-document override.
     if (ocrLanguageCombo) {
         int idx = ocrLanguageCombo->findData(m_doc->ocrLanguage);
@@ -321,6 +461,36 @@ void DocumentSettingsDialog::applyChanges()
              !qFuzzyCompare(selected.height(), m_doc->defaultPageSize.height()))) {
             m_doc->defaultPageSize = selected;
             m_doc->markModified();
+        }
+    }
+
+    // Background override (applies document-wide via MainWindow, which updates
+    // the defaults + every page/tile, preserves PDF backgrounds, redraws, and
+    // refreshes thumbnails). Only apply when something changed, so a no-op OK
+    // doesn't dirty the document or trigger a full redraw/thumbnail rebuild.
+    if (bgStyleCombo && mainWindowRef) {
+        // Resolve the target type. When the document's original type isn't one of
+        // the listed styles (PDF/Custom) and the user left the fallback selection
+        // untouched (index 0), preserve the original type rather than clobbering
+        // it to None; only a deliberate pick of a listed style overrides it.
+        int typeValue;
+        if (bgTypeInCombo || bgStyleCombo->currentIndex() != 0) {
+            typeValue = bgStyleCombo->currentData().toInt();
+        } else {
+            typeValue = loadedBgTypeValue;
+        }
+        const auto type = static_cast<Page::BackgroundType>(typeValue);
+        const int gridSpacing = gridSpacingSpin ? gridSpacingSpin->value() : m_doc->defaultGridSpacing;
+        const int lineSpacing = lineSpacingSpin ? lineSpacingSpin->value() : m_doc->defaultLineSpacing;
+        const bool bgChanged =
+            type != m_doc->defaultBackgroundType ||
+            selectedBgColor != m_doc->defaultBackgroundColor ||
+            selectedGridColor != m_doc->defaultGridColor ||
+            gridSpacing != m_doc->defaultGridSpacing ||
+            lineSpacing != m_doc->defaultLineSpacing;
+        if (bgChanged) {
+            mainWindowRef->applyBackgroundSettings(
+                type, selectedBgColor, selectedGridColor, gridSpacing, lineSpacing);
         }
     }
 
