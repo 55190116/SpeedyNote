@@ -3346,13 +3346,17 @@ private:
     
     /**
      * @brief Convenience: push a single-stroke undo on a given page (paged mode).
+     * @param layerIndex Layer the stroke was added to/removed from, so undo/redo
+     *                   restores it onto the correct layer (defaults to active layer).
      */
-    void pushPageStrokeUndo(int pageIndex, UndoAction::Type type, const VectorStroke& stroke);
+    void pushPageStrokeUndo(int pageIndex, UndoAction::Type type, const VectorStroke& stroke, int layerIndex);
     
     /**
      * @brief Convenience: push a multi-stroke undo on a given page (paged mode).
+     * @param layerIndex Layer the strokes were added to/removed from, so undo/redo
+     *                   restores them onto the correct layer.
      */
-    void pushPageStrokesUndo(int pageIndex, UndoAction::Type type, const QVector<VectorStroke>& strokes);
+    void pushPageStrokesUndo(int pageIndex, UndoAction::Type type, const QVector<VectorStroke>& strokes, int layerIndex);
     
     /**
      * @brief Trim undo stack to MAX_UNDO_ACTIONS if exceeded.
