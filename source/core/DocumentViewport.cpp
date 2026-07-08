@@ -4118,6 +4118,13 @@ void DocumentViewport::preloadStrokeCaches()
         pageBuffer = 0;
     int keepStart = qMax(0, first - pageBuffer);
     int keepEnd = qMin(pageCount - 1, last + pageBuffer);
+
+    // Never preload beyond the eviction keep window, otherwise the next
+    // preload/scroll evicts these pages and we reload (and re-decode every
+    // image asset) on the following stroke. At high zoom pageBuffer == 0, so
+    // this clamps preload to the visible pages only.
+    preloadStart = qMax(preloadStart, keepStart);
+    preloadEnd   = qMin(preloadEnd, keepEnd);
     
     // Phase O1.7.5: Evict pages far from visible area (lazy loading mode)
     // Only evict if lazy loading is enabled (bundle format)
