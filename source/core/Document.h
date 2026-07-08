@@ -154,6 +154,11 @@ public:
     QString ocrLanguage;                ///< Per-document OCR recognizer name (empty = global fallback)
     bool ocrSnapToBackground = false;   ///< Snap OCR grouping to grid/line spacing
 
+    // ===== PDF Display Overrides (PDF-backed documents only) =====
+    // Tri-state: -1 = inherit global setting, 0 = off, 1 = on.
+    int pdfInvertDarkOverride = -1;          ///< Invert PDF lightness in dark mode
+    int pdfInvertIncludeImagesOverride = -1; ///< Invert entire page including images
+
     // ===== State =====
     bool modified = false;              ///< True if document has unsaved changes
     int lastAccessedPage = 0;           ///< Last viewed page index (for restoring position)

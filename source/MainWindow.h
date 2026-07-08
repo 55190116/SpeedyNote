@@ -135,6 +135,11 @@ public:
     // Subset already present locally; the rest need an on-demand download.
     QStringList ocrDownloadedLanguages() const { return m_ocrDownloadedLanguages; }
 
+    // Apply a per-document OCR recognizer language override (empty = global
+    // fallback). Marks the document modified and refreshes the OCR worker.
+    // Shared by showOcrLanguageDialog() and DocumentSettingsDialog.
+    void applyDocumentOcrLanguage(Document* doc, const QString& lang);
+
     // Theme settings
     QColor customAccentColor;
     bool useCustomAccentColor = false;
@@ -159,6 +164,14 @@ public:
     QColor getDefaultPenColor();
     void setPdfDarkModeEnabled(bool enabled);
     void setSkipImageMasking(bool skip);
+
+    // Per-document PDF display overrides (PDF-backed documents only). Resolve to
+    // the document's tri-state override when set (>= 0), else the global
+    // QSettings value. refreshPdfDisplaySettingsForDocument() re-applies the
+    // resolved values to every viewport currently showing the document.
+    bool resolvePdfDarkMode(Document* doc) const;
+    bool resolvePdfInvertIncludeImages(Document* doc) const;
+    void refreshPdfDisplaySettingsForDocument(Document* doc);
 
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
     SDLControllerManager *controllerManager = nullptr;

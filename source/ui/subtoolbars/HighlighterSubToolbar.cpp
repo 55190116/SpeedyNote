@@ -261,6 +261,12 @@ void HighlighterSubToolbar::clearTabState(int tabIndex)
     m_tabStates.remove(tabIndex);
 }
 
+void HighlighterSubToolbar::cycleColor()
+{
+    int start = qMax(0, m_selectedColorIndex);
+    onColorPresetClicked((start + 1) % NUM_PRESETS);
+}
+
 void HighlighterSubToolbar::onColorPresetClicked(int index)
 {
     if (index < 0 || index >= NUM_PRESETS) return;

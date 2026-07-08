@@ -150,6 +150,13 @@ public:
      */
     QColor currentColor() const;
 
+    /**
+     * @brief Advance to the next color preset (wraps), applying and persisting it.
+     * Reuses the click-handler path so behaviour matches a manual preset click.
+     * (Highlighter has no thickness presets.)
+     */
+    void cycleColor();
+
 signals:
     /**
      * @brief Emitted when the highlighter color changes.

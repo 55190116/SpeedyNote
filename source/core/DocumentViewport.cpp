@@ -4118,6 +4118,13 @@ void DocumentViewport::preloadStrokeCaches()
         pageBuffer = 0;
     int keepStart = qMax(0, first - pageBuffer);
     int keepEnd = qMin(pageCount - 1, last + pageBuffer);
+
+    // Never preload beyond the eviction keep window, otherwise the next
+    // preload/scroll evicts these pages and we reload (and re-decode every
+    // image asset) on the following stroke. At high zoom pageBuffer == 0, so
+    // this clamps preload to the visible pages only.
+    preloadStart = qMax(preloadStart, keepStart);
+    preloadEnd   = qMin(preloadEnd, keepEnd);
     
     // Phase O1.7.5: Evict pages far from visible area (lazy loading mode)
     // Only evict if lazy loading is enabled (bundle format)
@@ -4951,7 +4958,7 @@ void DocumentViewport::finishStroke()
             m_document->markPageDirty(m_activeDrawingPage);
             
             // Push to undo stack
-            pushPageStrokeUndo(m_activeDrawingPage, UndoAction::AddStroke, m_currentStroke);
+            pushPageStrokeUndo(m_activeDrawingPage, UndoAction::AddStroke, m_currentStroke, page->activeLayerIndex);
         }
     }
     
@@ -5306,7 +5313,7 @@ void DocumentViewport::createStraightLineStroke(const QPointF& start, const QPoi
         m_document->markPageDirty(m_straightLinePageIndex);
         
         // Push to undo stack (same pattern as finishStroke)
-        pushPageStrokeUndo(m_straightLinePageIndex, UndoAction::AddStroke, stroke);
+        pushPageStrokeUndo(m_straightLinePageIndex, UndoAction::AddStroke, stroke, page->activeLayerIndex);
     }
     
     emit documentModified();
@@ -11963,11 +11970,11 @@ QVector<QString> DocumentViewport::createHighlightStrokes()
                 layer->addStroke(d);
                 createdIds.append(d.id);
             }
-            pushPageStrokesUndo(pageIndex, UndoAction::AddStroke, dots);
+            pushPageStrokesUndo(pageIndex, UndoAction::AddStroke, dots, page->activeLayerIndex);
         } else {
             VectorStroke stroke = createHighlightStroke(pageRect, m_highlighterColor, style);
             layer->addStroke(stroke);
-            pushPageStrokeUndo(pageIndex, UndoAction::AddStroke, stroke);
+            pushPageStrokeUndo(pageIndex, UndoAction::AddStroke, stroke, page->activeLayerIndex);
             createdIds.append(stroke.id);
         }
     }
@@ -12301,9 +12308,9 @@ void DocumentViewport::eraseAt(const PointerEvent& pe)
     
     // Push undo action
     if (removedStrokes.size() == 1) {
-        pushPageStrokeUndo(pe.pageHit.pageIndex, UndoAction::RemoveStroke, removedStrokes[0]);
+        pushPageStrokeUndo(pe.pageHit.pageIndex, UndoAction::RemoveStroke, removedStrokes[0], page->activeLayerIndex);
     } else if (removedStrokes.size() > 1) {
-        pushPageStrokesUndo(pe.pageHit.pageIndex, UndoAction::RemoveMultiple, removedStrokes);
+        pushPageStrokesUndo(pe.pageHit.pageIndex, UndoAction::RemoveMultiple, removedStrokes, page->activeLayerIndex);
     }
     
     emit documentModified();
@@ -12557,10 +12564,11 @@ void DocumentViewport::markOcrDirtyTiles(const UndoAction& action)
         m_ocrDirtyTiles.insert(seg.tileCoord);
 }
 
-void DocumentViewport::pushPageStrokeUndo(int pageIndex, UndoAction::Type type, const VectorStroke& stroke)
+void DocumentViewport::pushPageStrokeUndo(int pageIndex, UndoAction::Type type, const VectorStroke& stroke, int layerIndex)
 {
     UndoAction action;
     action.type = type;
+    action.layerIndex = layerIndex;
     UndoAction::StrokeSegment seg;
     seg.pageIndex = pageIndex;
     seg.stroke = stroke;
@@ -12573,10 +12581,11 @@ void DocumentViewport::pushPageStrokeUndo(int pageIndex, UndoAction::Type type, 
     emit strokesChanged();
 }
 
-void DocumentViewport::pushPageStrokesUndo(int pageIndex, UndoAction::Type type, const QVector<VectorStroke>& strokes)
+void DocumentViewport::pushPageStrokesUndo(int pageIndex, UndoAction::Type type, const QVector<VectorStroke>& strokes, int layerIndex)
 {
     UndoAction action;
     action.type = type;
+    action.layerIndex = layerIndex;
     for (const auto& s : strokes) {
         UndoAction::StrokeSegment seg;
         seg.pageIndex = pageIndex;

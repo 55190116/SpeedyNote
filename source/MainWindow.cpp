@@ -122,6 +122,7 @@
 #endif // Q_OS_ANDROID / Q_OS_IOS
 // #include "HandwritingLineEdit.h"
 #include "ControlPanelDialog.h"  // Phase CP.1: Re-enabled with cleaned up tabs
+#include "ui/dialogs/DocumentSettingsDialog.h"  // Per-document override panel
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
 #include "SDLControllerManager.h"
 #endif
@@ -377,9 +378,9 @@ MainWindow::MainWindow(QWidget *parent)
         // Sync viewport dark mode with current theme
         if (vp) {
             vp->setDarkMode(isDarkMode());
-            QSettings s("SpeedyNote", "App");
-            vp->setPdfDarkModeEnabled(s.value("display/pdfDarkMode", true).toBool());
-            vp->setSkipImageMasking(s.value("display/skipImageMasking", false).toBool());
+            // Resolve per-document overrides (falls back to global QSettings).
+            vp->setPdfDarkModeEnabled(resolvePdfDarkMode(vp->document()));
+            vp->setSkipImageMasking(resolvePdfInvertIncludeImages(vp->document()));
         }
         
         // Phase 5.1 Task 4: Update LayerPanel when tab changes
@@ -1082,12 +1083,15 @@ void MainWindow::setupUi() {
     
     overflowMenu->addSeparator();
 
-    // MAC.6 review fix: pre-MAC.6 this wrapped showOcrLanguageDialog() in a
-    // no-arg lambda because the slot was private. After MAC.6 promoted it to
-    // private slots: (so MacMenuBar can invokeMethod it), the direct PMF
-    // connect works and matches the lockAllOcrAction pattern below.
-    QAction *ocrLanguageAction = overflowMenu->addAction(tr("OCR Language..."));
-    connect(ocrLanguageAction, &QAction::triggered, this, &MainWindow::showOcrLanguageDialog);
+    // Per-document override panel. Replaces the standalone "OCR Language..."
+    // item; the OCR language override now lives in its Language tab. The macOS
+    // menu still opens showOcrLanguageDialog() directly (see MacMenuBar).
+    QAction *docSettingsAction = overflowMenu->addAction(tr("Current Document Settings..."));
+    connect(docSettingsAction, &QAction::triggered, this, [this]() {
+        DocumentViewport* vp = currentViewport();
+        DocumentSettingsDialog dlg(this, vp ? vp->document() : nullptr, this);
+        dlg.exec();
+    });
 
     // MAC.6: body extracted to MainWindow::lockAllOcrText() so the macOS OCR
     // menu (which can't access this private inline lambda) shares one
@@ -1916,72 +1920,130 @@ void MainWindow::wireQActionDispatchers()
     // Its registry shortcut is read once in setupManagedShortcuts() to seed
     // m_panHoldKey; onShortcutChanged keeps it in sync after user remaps.
 
+    // Ensure `tool` is active on `vp`, using the same override/pan-hold cleanup
+    // as wireToolKey. No-op when already active (setCurrentTool also early-returns),
+    // so it never disturbs the current object/highlighter sub-mode. Used by the
+    // object-mode and highlighter shortcuts below so they auto-switch to their
+    // tool instead of no-opping under a different tool.
+    auto ensureTool = [](MainWindow* w, DocumentViewport* vp, ToolType tool) {
+        if (vp->currentTool() == tool) return;
+        if (w->m_panHoldActive) w->m_panHoldActive = false;
+        if (w->m_toolOverrideViewport == vp) w->m_toolOverrideViewport = nullptr;
+        vp->setCurrentTool(tool);  // emits toolChanged -> toolbar/subtoolbar refresh
+    };
+
+    // ----- Cycle color / thickness presets -----
+    // Single-key shortcuts that advance the ACTIVE tool's color / thickness
+    // preset selection. Gated on the current tool so the key only acts on a
+    // tool that owns the relevant preset set (silent no-op otherwise). The
+    // isTextFocused guard mirrors the letter-key tools above so typing 'C'/'X'
+    // into a text field doesn't cycle presets. Cycling emits the subtoolbar's
+    // existing change signal, so the value applies live even when the
+    // subtoolbar isn't expanded.
+    wire("tool.cycle_color", [isTextFocused](MainWindow* w){
+        if (isTextFocused() || !w->m_toolbar) return;
+        auto* vp = w->currentViewport();
+        if (!vp) return;
+        switch (vp->currentTool()) {
+            case ToolType::Pen:
+                if (auto* st = w->m_toolbar->penSubToolbar()) st->cycleColor();
+                break;
+            case ToolType::Marker:
+                if (auto* st = w->m_toolbar->markerSubToolbar()) st->cycleColor();
+                break;
+            case ToolType::Highlighter:
+                if (auto* st = w->m_toolbar->highlighterSubToolbar()) st->cycleColor();
+                break;
+            default: break;  // tool has no color presets
+        }
+    });
+    wire("tool.cycle_thickness", [isTextFocused](MainWindow* w){
+        if (isTextFocused() || !w->m_toolbar) return;
+        auto* vp = w->currentViewport();
+        if (!vp) return;
+        switch (vp->currentTool()) {
+            case ToolType::Pen:
+                if (auto* st = w->m_toolbar->penSubToolbar()) st->cycleThickness();
+                break;
+            case ToolType::Marker:
+                if (auto* st = w->m_toolbar->markerSubToolbar()) st->cycleThickness();
+                break;
+            case ToolType::Eraser:
+                if (auto* st = w->m_toolbar->eraserSubToolbar()) st->cycleSize();
+                break;
+            default: break;  // tool has no thickness presets
+        }
+    });
+
     // ----- Highlighter Style (MAC.7) -----
     // Style shortcuts drive the dropdown's QAction::trigger() path so the
     // existing onAutoHighlightStyleTriggered() slot handles persistence,
     // check-state, icon refresh, and autoHighlightStyleChanged emission.
-    // No current-tool gate: these set the globally persisted style, so users
-    // can pre-configure before switching to the Highlighter tool.
+    // These auto-switch to the Highlighter tool first (via ensureTool) so the
+    // style/source change takes effect immediately even when another tool is
+    // active; the subtoolbar call remains the single source that pushes state
+    // to the viewport.
     using HS = HighlighterSubToolbar::HighlightStyle;
-    wire("highlighter.style_none", [](MainWindow* w){
+    wire("highlighter.style_none", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::None);
     });
-    wire("highlighter.style_cover", [](MainWindow* w){
+    wire("highlighter.style_cover", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::Cover);
     });
-    wire("highlighter.style_underline", [](MainWindow* w){
+    wire("highlighter.style_underline", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::Underline);
     });
-    wire("highlighter.style_dotted", [](MainWindow* w){
+    wire("highlighter.style_dotted", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::DottedUnderline);
     });
-    wire("highlighter.toggle_source", [](MainWindow* w){
+    wire("highlighter.toggle_source", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->toggleSelectionSourceFromShortcut();
     });
 
     // ----- Insert / Object Mode (MAC.7) -----
     // object.mode_image uses the focus-check guard (single-letter "I"); the
-    // others are modifier-bearing and don't need it. All five are gated on
-    // currentTool == ObjectSelect inside the handler — pre-MAC.7 behaviour.
-    wire("object.mode_image", [isTextFocused](MainWindow* w){
+    // others are modifier-bearing and don't need it. All five auto-switch to
+    // the ObjectSelect tool (via ensureTool) before arming their mode, so they
+    // work regardless of the currently active tool.
+    wire("object.mode_image", [isTextFocused, ensureTool](MainWindow* w){
         if (isTextFocused()) return;
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Image);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Image);
         }
     });
-    wire("object.mode_text", [](MainWindow* w){
+    wire("object.mode_text", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Text);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Text);
         }
     });
-    wire("object.mode_link", [](MainWindow* w){
+    wire("object.mode_link", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Link);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Link);
         }
     });
-    wire("object.mode_create", [](MainWindow* w){
+    wire("object.mode_create", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Create);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Create);
         }
     });
-    wire("object.mode_select", [](MainWindow* w){
+    wire("object.mode_select", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Select);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Select);
         }
     });
 
@@ -2123,6 +2185,8 @@ void MainWindow::setupManagedShortcuts()
     bindAction("tool.eraser");
     bindAction("tool.lasso");
     bindAction("tool.object_select");
+    bindAction("tool.cycle_color");
+    bindAction("tool.cycle_thickness");
     bindAction("highlighter.style_none");
     bindAction("highlighter.style_cover");
     bindAction("highlighter.style_underline");
@@ -4711,25 +4775,68 @@ QColor MainWindow::getDefaultPenColor() {
     return isDarkMode() ? Qt::white : Qt::black;
 }
 
-void MainWindow::setPdfDarkModeEnabled(bool enabled) {
+void MainWindow::setPdfDarkModeEnabled(bool /*enabled*/) {
+    // The new global value is already persisted to QSettings by the caller. Push
+    // the RESOLVED value per viewport so documents with a per-document override
+    // keep it, while "inherit" documents follow the new global.
     if (m_splitViewManager) {
         m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
             for (int i = 0; i < tm->tabCount(); ++i) {
                 if (DocumentViewport* vp = tm->viewportAt(i))
-                    vp->setPdfDarkModeEnabled(enabled);
+                    vp->setPdfDarkModeEnabled(resolvePdfDarkMode(vp->document()));
             }
         });
     }
 }
 
-void MainWindow::setSkipImageMasking(bool skip) {
+void MainWindow::setSkipImageMasking(bool /*skip*/) {
+    // See setPdfDarkModeEnabled: resolve per document so overrides are preserved.
     if (m_splitViewManager) {
         m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
             for (int i = 0; i < tm->tabCount(); ++i) {
                 if (DocumentViewport* vp = tm->viewportAt(i))
-                    vp->setSkipImageMasking(skip);
+                    vp->setSkipImageMasking(resolvePdfInvertIncludeImages(vp->document()));
             }
         });
+    }
+}
+
+bool MainWindow::resolvePdfDarkMode(Document* doc) const {
+    if (doc && doc->pdfInvertDarkOverride >= 0)
+        return doc->pdfInvertDarkOverride == 1;
+    return QSettings("SpeedyNote", "App").value("display/pdfDarkMode", true).toBool();
+}
+
+bool MainWindow::resolvePdfInvertIncludeImages(Document* doc) const {
+    if (doc && doc->pdfInvertIncludeImagesOverride >= 0)
+        return doc->pdfInvertIncludeImagesOverride == 1;
+    return QSettings("SpeedyNote", "App").value("display/skipImageMasking", false).toBool();
+}
+
+void MainWindow::refreshPdfDisplaySettingsForDocument(Document* doc) {
+    if (!doc || !m_splitViewManager) return;
+    const bool darkInvert = resolvePdfDarkMode(doc);
+    const bool includeImages = resolvePdfInvertIncludeImages(doc);
+    m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+        for (int i = 0; i < tm->tabCount(); ++i) {
+            DocumentViewport* vp = tm->viewportAt(i);
+            if (vp && vp->document() == doc) {
+                vp->setPdfDarkModeEnabled(darkInvert);
+                vp->setSkipImageMasking(includeImages);
+                vp->update();
+            }
+        }
+    });
+    // Keep the current-document thumbnails in sync when it's the active doc.
+    // setPdfDarkMode only updates the renderer flag, so invalidate the cache to
+    // force a re-render (otherwise thumbnails keep the old inversion until they
+    // happen to regenerate).
+    if (m_pagePanel) {
+        DocumentViewport* cur = currentViewport();
+        if (cur && cur->document() == doc) {
+            m_pagePanel->setPdfDarkMode(isDarkMode() && darkInvert);
+            m_pagePanel->invalidateAllThumbnails();
+        }
     }
 }
 
@@ -4859,17 +4966,15 @@ void MainWindow::updateTheme() {
         m_splitViewManager->updateTheme(darkMode, accentColor);
     }
     
-    // Update all DocumentViewports across both panes
+    // Update all DocumentViewports across both panes (resolve per-document
+    // PDF display overrides; falls back to global QSettings).
     if (m_splitViewManager) {
-        QSettings s("SpeedyNote", "App");
-        bool pdfDarkMode = s.value("display/pdfDarkMode", true).toBool();
-        bool skipMasking = s.value("display/skipImageMasking", false).toBool();
         m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
             for (int i = 0; i < tm->tabCount(); ++i) {
                 if (DocumentViewport* vp = tm->viewportAt(i)) {
                     vp->setDarkMode(darkMode);
-                    vp->setPdfDarkModeEnabled(pdfDarkMode);
-                    vp->setSkipImageMasking(skipMasking);
+                    vp->setPdfDarkModeEnabled(resolvePdfDarkMode(vp->document()));
+                    vp->setSkipImageMasking(resolvePdfInvertIncludeImages(vp->document()));
                 }
             }
         });
@@ -4890,10 +4995,11 @@ void MainWindow::updateTheme() {
         m_floatingTextEditor->setDarkMode(darkMode);
     }
 
-    // Sync thumbnail renderer dark mode state
+    // Sync thumbnail renderer dark mode state (respect the current document's
+    // PDF inversion override).
     if (m_pagePanel) {
-        QSettings s("SpeedyNote", "App");
-        bool pdfDarkMode = darkMode && s.value("display/pdfDarkMode", true).toBool();
+        DocumentViewport* vp = currentViewport();
+        bool pdfDarkMode = darkMode && resolvePdfDarkMode(vp ? vp->document() : nullptr);
         m_pagePanel->setPdfDarkMode(pdfDarkMode);
     }
     
@@ -6806,10 +6912,13 @@ void MainWindow::showOcrLanguageDialog()
     if (dlg.exec() != QDialog::Accepted)
         return;
 
-    QString chosen = combo->currentData().toString();
+    applyDocumentOcrLanguage(doc, combo->currentData().toString());
+}
 
+void MainWindow::applyDocumentOcrLanguage(Document* doc, const QString& lang)
+{
     if (doc) {
-        doc->ocrLanguage = chosen;
+        doc->ocrLanguage = lang;
         doc->modified = true;
     }
 

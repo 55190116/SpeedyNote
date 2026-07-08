@@ -73,6 +73,17 @@ public:
      */
     qreal currentThickness() const;
 
+    /**
+     * @brief Advance to the next color preset (wraps), applying and persisting it.
+     * Reuses the click-handler path so behaviour matches a manual preset click.
+     */
+    void cycleColor();
+
+    /**
+     * @brief Advance to the next thickness preset (wraps), applying and persisting it.
+     */
+    void cycleThickness();
+
 signals:
     /**
      * @brief Emitted when the marker color changes.

@@ -1,7 +1,7 @@
 ﻿cmake_minimum_required(VERSION 3.16)
 cmake_policy(SET CMP0074 NEW)
 
-project(SpeedyNote VERSION 1.4.8 LANGUAGES C CXX)
+project(SpeedyNote VERSION 1.4.9 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1055,6 +1055,7 @@ set(APP_SOURCES
     source/ui/dialogs/BatchPdfExportDialog.cpp
     source/ui/dialogs/BatchSnbxExportDialog.cpp
     source/ui/dialogs/ExportResultsDialog.cpp
+    source/ui/dialogs/DocumentSettingsDialog.cpp
     source/text/MarkdownNoteEntry.cpp
     source/ui/MarkdownNotesSidebar.cpp
         ${CORE_SOURCES}

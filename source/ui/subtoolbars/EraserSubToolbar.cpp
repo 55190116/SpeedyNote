@@ -201,6 +201,12 @@ void EraserSubToolbar::clearTabState(int tabIndex)
     m_tabStates.remove(tabIndex);
 }
 
+void EraserSubToolbar::cycleSize()
+{
+    int start = qMax(0, m_selectedSizeIndex);
+    onSizePresetClicked((start + 1) % NUM_PRESETS);
+}
+
 void EraserSubToolbar::onSizePresetClicked(int index)
 {
     if (index < 0 || index >= NUM_PRESETS) return;

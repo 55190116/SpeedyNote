@@ -79,6 +79,22 @@
 
 
   <releases type="embedded">
+    <release version="1.4.9" date="2026-07-07">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Added a per-document settings override panel.</li>
+          <li>Added color and thickness preset cycle keyboard shortcuts.</li>
+          <li>New auto-switch tool for object-mode and highlighter shortcuts.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the page eviction/preload thrashing issue when the user edited pages in a document with pictures inserted.</li>
+          <li>Fixed the problem that images could sometimes fail to be copied to the .snb folder.</li>
+          <li>Fixed the problem that undo/redo features did not work well with multiple stroke layers.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.8" date="2026-06-04">
       <description>
         <p>Bug Fixes and Improvements:</p>
