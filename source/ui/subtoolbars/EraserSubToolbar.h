@@ -50,6 +50,12 @@ public:
     qreal currentSize() const;
 
     /**
+     * @brief Advance to the next size preset (wraps), applying and persisting it.
+     * Reuses the click-handler path so behaviour matches a manual preset click.
+     */
+    void cycleSize();
+
+    /**
      * @brief Get the current eraser mode index (0 = Normal, 1 = Lasso).
      */
     int currentModeIndex() const;

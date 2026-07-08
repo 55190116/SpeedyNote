@@ -1920,72 +1920,130 @@ void MainWindow::wireQActionDispatchers()
     // Its registry shortcut is read once in setupManagedShortcuts() to seed
     // m_panHoldKey; onShortcutChanged keeps it in sync after user remaps.
 
+    // Ensure `tool` is active on `vp`, using the same override/pan-hold cleanup
+    // as wireToolKey. No-op when already active (setCurrentTool also early-returns),
+    // so it never disturbs the current object/highlighter sub-mode. Used by the
+    // object-mode and highlighter shortcuts below so they auto-switch to their
+    // tool instead of no-opping under a different tool.
+    auto ensureTool = [](MainWindow* w, DocumentViewport* vp, ToolType tool) {
+        if (vp->currentTool() == tool) return;
+        if (w->m_panHoldActive) w->m_panHoldActive = false;
+        if (w->m_toolOverrideViewport == vp) w->m_toolOverrideViewport = nullptr;
+        vp->setCurrentTool(tool);  // emits toolChanged -> toolbar/subtoolbar refresh
+    };
+
+    // ----- Cycle color / thickness presets -----
+    // Single-key shortcuts that advance the ACTIVE tool's color / thickness
+    // preset selection. Gated on the current tool so the key only acts on a
+    // tool that owns the relevant preset set (silent no-op otherwise). The
+    // isTextFocused guard mirrors the letter-key tools above so typing 'C'/'X'
+    // into a text field doesn't cycle presets. Cycling emits the subtoolbar's
+    // existing change signal, so the value applies live even when the
+    // subtoolbar isn't expanded.
+    wire("tool.cycle_color", [isTextFocused](MainWindow* w){
+        if (isTextFocused() || !w->m_toolbar) return;
+        auto* vp = w->currentViewport();
+        if (!vp) return;
+        switch (vp->currentTool()) {
+            case ToolType::Pen:
+                if (auto* st = w->m_toolbar->penSubToolbar()) st->cycleColor();
+                break;
+            case ToolType::Marker:
+                if (auto* st = w->m_toolbar->markerSubToolbar()) st->cycleColor();
+                break;
+            case ToolType::Highlighter:
+                if (auto* st = w->m_toolbar->highlighterSubToolbar()) st->cycleColor();
+                break;
+            default: break;  // tool has no color presets
+        }
+    });
+    wire("tool.cycle_thickness", [isTextFocused](MainWindow* w){
+        if (isTextFocused() || !w->m_toolbar) return;
+        auto* vp = w->currentViewport();
+        if (!vp) return;
+        switch (vp->currentTool()) {
+            case ToolType::Pen:
+                if (auto* st = w->m_toolbar->penSubToolbar()) st->cycleThickness();
+                break;
+            case ToolType::Marker:
+                if (auto* st = w->m_toolbar->markerSubToolbar()) st->cycleThickness();
+                break;
+            case ToolType::Eraser:
+                if (auto* st = w->m_toolbar->eraserSubToolbar()) st->cycleSize();
+                break;
+            default: break;  // tool has no thickness presets
+        }
+    });
+
     // ----- Highlighter Style (MAC.7) -----
     // Style shortcuts drive the dropdown's QAction::trigger() path so the
     // existing onAutoHighlightStyleTriggered() slot handles persistence,
     // check-state, icon refresh, and autoHighlightStyleChanged emission.
-    // No current-tool gate: these set the globally persisted style, so users
-    // can pre-configure before switching to the Highlighter tool.
+    // These auto-switch to the Highlighter tool first (via ensureTool) so the
+    // style/source change takes effect immediately even when another tool is
+    // active; the subtoolbar call remains the single source that pushes state
+    // to the viewport.
     using HS = HighlighterSubToolbar::HighlightStyle;
-    wire("highlighter.style_none", [](MainWindow* w){
+    wire("highlighter.style_none", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::None);
     });
-    wire("highlighter.style_cover", [](MainWindow* w){
+    wire("highlighter.style_cover", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::Cover);
     });
-    wire("highlighter.style_underline", [](MainWindow* w){
+    wire("highlighter.style_underline", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::Underline);
     });
-    wire("highlighter.style_dotted", [](MainWindow* w){
+    wire("highlighter.style_dotted", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->selectAutoHighlightStyleFromShortcut(HS::DottedUnderline);
     });
-    wire("highlighter.toggle_source", [](MainWindow* w){
+    wire("highlighter.toggle_source", [ensureTool](MainWindow* w){
+        if (auto* vp = w->currentViewport()) ensureTool(w, vp, ToolType::Highlighter);
         if (auto* st = w->m_toolbar ? w->m_toolbar->highlighterSubToolbar() : nullptr)
             st->toggleSelectionSourceFromShortcut();
     });
 
     // ----- Insert / Object Mode (MAC.7) -----
     // object.mode_image uses the focus-check guard (single-letter "I"); the
-    // others are modifier-bearing and don't need it. All five are gated on
-    // currentTool == ObjectSelect inside the handler — pre-MAC.7 behaviour.
-    wire("object.mode_image", [isTextFocused](MainWindow* w){
+    // others are modifier-bearing and don't need it. All five auto-switch to
+    // the ObjectSelect tool (via ensureTool) before arming their mode, so they
+    // work regardless of the currently active tool.
+    wire("object.mode_image", [isTextFocused, ensureTool](MainWindow* w){
         if (isTextFocused()) return;
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Image);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Image);
         }
     });
-    wire("object.mode_text", [](MainWindow* w){
+    wire("object.mode_text", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Text);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Text);
         }
     });
-    wire("object.mode_link", [](MainWindow* w){
+    wire("object.mode_link", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Link);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectInsertMode(DocumentViewport::ObjectInsertMode::Link);
         }
     });
-    wire("object.mode_create", [](MainWindow* w){
+    wire("object.mode_create", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Create);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Create);
         }
     });
-    wire("object.mode_select", [](MainWindow* w){
+    wire("object.mode_select", [ensureTool](MainWindow* w){
         if (auto* vp = w->currentViewport()) {
-            if (vp->currentTool() == ToolType::ObjectSelect) {
-                vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Select);
-            }
+            ensureTool(w, vp, ToolType::ObjectSelect);
+            vp->setObjectActionMode(DocumentViewport::ObjectActionMode::Select);
         }
     });
 
@@ -2127,6 +2185,8 @@ void MainWindow::setupManagedShortcuts()
     bindAction("tool.eraser");
     bindAction("tool.lasso");
     bindAction("tool.object_select");
+    bindAction("tool.cycle_color");
+    bindAction("tool.cycle_thickness");
     bindAction("highlighter.style_none");
     bindAction("highlighter.style_cover");
     bindAction("highlighter.style_underline");

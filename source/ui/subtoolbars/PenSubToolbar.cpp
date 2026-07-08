@@ -285,6 +285,18 @@ void PenSubToolbar::clearTabState(int tabIndex)
     m_tabStates.remove(tabIndex);
 }
 
+void PenSubToolbar::cycleColor()
+{
+    int start = qMax(0, m_selectedColorIndex);
+    onColorPresetClicked((start + 1) % NUM_PRESETS);
+}
+
+void PenSubToolbar::cycleThickness()
+{
+    int start = qMax(0, m_selectedThicknessIndex);
+    onThicknessPresetClicked((start + 1) % NUM_PRESETS);
+}
+
 void PenSubToolbar::onColorPresetClicked(int index)
 {
     if (index < 0 || index >= NUM_PRESETS) return;

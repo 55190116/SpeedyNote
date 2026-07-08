@@ -145,6 +145,10 @@ void ShortcutManager::registerDefaults()
     registerAction("tool.marker", "M", tr("Marker Tool"), tr("Tools"));
     registerAction("tool.object_select", "V", tr("Object Select Tool"), tr("Tools"));
     registerAction("tool.pan", "H", tr("Pan Tool (Hold)"), tr("Tools"));
+    // Cycle the active tool's color / thickness presets (single-key, remappable).
+    // Color applies to Pen/Marker/Highlighter; thickness to Pen/Marker/Eraser.
+    registerAction("tool.cycle_color", "C", tr("Cycle Tool Color"), tr("Tools"));
+    registerAction("tool.cycle_thickness", "X", tr("Cycle Tool Thickness"), tr("Tools"));
     
     // ===== Editing =====
     registerAction("edit.undo", "Ctrl+Z", tr("Undo"), tr("Edit"));
