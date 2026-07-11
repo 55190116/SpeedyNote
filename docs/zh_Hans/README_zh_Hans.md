@@ -12,7 +12,10 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android%20%7C%20iPadOS-brightgreen)]()
 [![Qt](https://img.shields.io/badge/Qt-6.x-41CD52?logo=qt)]()
 
-[![Get it on Flathub](https://flathub.org/assets/badges/flathub-badge-i-en.png)](https://flathub.org/zh-Hans/apps/org.speedynote.SpeedyNote)
+
+<a href="https://flathub.org/en/apps/org.speedynote.SpeedyNote"><img src="https://flathub.org/assets/badges/flathub-badge-i-en.png" alt="Get it on Flathub" height="54"></a>
+&nbsp;&nbsp;
+<a href="https://hellogithub.com/repository/alpha-liu-01/SpeedyNote"><img src="https://abroad.hellogithub.com/v1/widgets/recommend.svg?rid=e86680d007424ab59d68d5e787ad5c12&claim_uid=e5oCIWstjbEUv9D" alt="Featured｜HelloGitHub" height="54"></a>
 
 [English](../../README.md) • [中文](./README_zh_Hans.md)
 
@@ -94,7 +97,7 @@
 
 | 平台          | 最低要求                     | 推荐配置             |
 | ----------- | ------------------------ | ---------------- |
-| **Windows** | Windows 10 1809          | Windows 11       |
+| **Windows** | Windows 7 SP1         | Windows 11       |
 | **macOS**   | macOS 13                | macOS 15+        |
 | **Linux**   | Ubuntu 22.04 / Fedora 38 | 任何支持 Qt 6.4+ 的系统 |
 | **Android** | Android 9 (API 28)       | Android 13+      |
@@ -131,21 +134,6 @@
 
 > iPadOS 构建通常需要越狱设备或使用 TrollStore。App Store 分发目前不可用。
 
-#### Linux APT 仓库（Debian/Ubuntu）
-
-```bash
-# 添加仓库并安装
-wget -O- https://apt.speedynote.org/speedynote-release-key.gpg | \
-  sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/speedynote.gpg
-
-echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/speedynote.gpg] \
-  https://apt.speedynote.org stable main" | \
-  sudo tee /etc/apt/sources.list.d/speedynote.list
-
-sudo apt update && sudo apt install speedynote
-```
-
----
 
 ## 从源码构建
 
@@ -203,8 +191,10 @@ SpeedyNote 支持多种语言：
 
 - 英语  
 - 简体中文  
-- Español（部分）  
-- Français（部分）
+- 西班牙语 
+- 法语
+- 葡萄牙语
+- 德语
 
 > 欢迎为更多翻译做出贡献！
 
@@ -259,6 +249,6 @@ SpeedyNote 采用 **GNU General Public License v3.0** 许可证。
 
 **为值得更好工具的学生打造**
 
-*SpeedyNote v1.0*
+*SpeedyNote v1.x*
 
 </div>

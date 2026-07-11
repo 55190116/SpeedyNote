@@ -97,7 +97,7 @@
 
 | Platform    | Minimum                  | Recommended      |
 | ----------- | ------------------------ | ---------------- |
-| **Windows** | Windows 10 1809          | Windows 11       |
+| **Windows** | Windows 7 SP1          | Windows 11       |
 | **macOS**   | macOS 13                 | macOS 15+        |
 | **Linux**   | Ubuntu 22.04 / Fedora 38 | Any with Qt 6.4+ |
 | **Android** | Android 9 (API 28)       | Android 13+      |
@@ -133,20 +133,6 @@ Download the latest release from **[GitHub Releases](https://github.com/alpha-li
 **Option 3: Build from source** - See [iPadOS Build Guide](./docs/build_docs/IOS_BUILD_GUIDE.md)
 
 > iPadOS builds require a jailbroken device or TrollStore. App Store distribution is not available at this time.
-
-#### Linux APT Repository (Debian/Ubuntu)
-
-```bash
-# Add repository and install
-wget -O- https://apt.speedynote.org/speedynote-release-key.gpg | \
-  sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/speedynote.gpg
-
-echo "deb [arch=amd64,arm64 signed-by=/etc/apt/trusted.gpg.d/speedynote.gpg] \
-  https://apt.speedynote.org stable main" | \
-  sudo tee /etc/apt/sources.list.d/speedynote.list
-
-sudo apt update && sudo apt install speedynote
-```
 
 ---
 
