@@ -3622,18 +3622,18 @@ bool DocumentViewport::event(QEvent* event)
 
 // ===== PDF Cache Helpers (Task 1.3.6) =====
 
-QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
+QPixmap DocumentViewport::getCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi)
 {
-    if (!m_document || !m_document->isPdfLoaded()) {
+    if (!m_document) {
         return QPixmap();
     }
     
     // Thread-safe cache lookup
     QMutexLocker locker(&m_pdfCacheMutex);
     
-    // Check if we have this page cached at the right DPI
+    // Check if we have this page cached at the right DPI (and source)
     for (const PdfCacheEntry& entry : m_pdfCache) {
-        if (entry.matches(pageIndex, dpi)) {
+        if (entry.matches(sourceId, pageIndex, dpi)) {
             return entry.pixmap;  // Cache hit - fast path
         }
     }
@@ -3657,7 +3657,7 @@ QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
 #endif
     
     // Render the page (expensive operation - done outside mutex)
-    QImage pdfImage = m_document->renderPdfPageToImage(pageIndex, dpi);
+    QImage pdfImage = m_document->renderPdfPageToImage(sourceId, pageIndex, dpi);
     if (pdfImage.isNull()) {
         return QPixmap();
     }
@@ -3666,7 +3666,7 @@ QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
     if (m_isDarkMode && m_pdfDarkModeEnabled) {
         QVector<QRect> imgRegions;
         if (!m_skipImageMasking) {
-            imgRegions = m_document->pdfImageRegions(pageIndex, dpi);
+            imgRegions = m_document->pdfImageRegions(sourceId, pageIndex, dpi);
         }
         DarkModeUtils::invertImageLightness(pdfImage, imgRegions);
     }
@@ -3680,12 +3680,13 @@ QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
     
     // Double-check it wasn't added by another thread while we were rendering
     for (const PdfCacheEntry& entry : m_pdfCache) {
-        if (entry.matches(pageIndex, dpi)) {
+        if (entry.matches(sourceId, pageIndex, dpi)) {
             return entry.pixmap;  // Another thread added it
         }
     }
     
     PdfCacheEntry entry;
+    entry.sourceId = sourceId;
     entry.pageIndex = pageIndex;
     entry.dpi = dpi;
     entry.pixmap = pixmap;
@@ -3722,7 +3723,7 @@ void DocumentViewport::preloadPdfCache()
 
 void DocumentViewport::doAsyncPdfPreload()
 {
-    if (!m_document || !m_document->isPdfLoaded()) {
+    if (!m_document) {
         return;
     }
     
@@ -3743,34 +3744,38 @@ void DocumentViewport::doAsyncPdfPreload()
     int preloadEnd = qMin(m_document->pageCount() - 1, last + preloadBuffer);
     
     qreal dpi = effectivePdfDpi();
-    QString pdfPath = m_document->pdfPath();
     
-    if (pdfPath.isEmpty()) {
-        return;  // No PDF path available
-    }
-    
-    // Collect pages that need preloading
-    QList<int> pagesToPreload;
+    // Collect (sourceId, pdfPageNum) pairs that need preloading, resolving each page
+    // to its own PDF source so multi-source documents preload the correct backgrounds.
+    struct PreloadItem { QString sourceId; int pdfPageNum; QString path; };
+    QList<PreloadItem> pagesToPreload;
     {
         QMutexLocker locker(&m_pdfCacheMutex);
         for (int i = preloadStart; i <= preloadEnd; ++i) {
             Page* page = m_document->page(i);
-            if (page && page->backgroundType == Page::BackgroundType::PDF) {
-                int pdfPageNum = page->pdfPageNumber;
-                
-                // Check if already cached
-                bool alreadyCached = false;
-                for (const PdfCacheEntry& entry : m_pdfCache) {
-                    if (entry.matches(pdfPageNum, dpi)) {
-                        alreadyCached = true;
-                        break;
-                    }
-                }
-                
-                if (!alreadyCached) {
-                    pagesToPreload.append(pdfPageNum);
+            if (!page || page->backgroundType != Page::BackgroundType::PDF) {
+                continue;
+            }
+            int pdfPageNum = page->pdfPageNumber;
+            const QString sourceId = page->pdfSourceId;
+            
+            // Check if already cached
+            bool alreadyCached = false;
+            for (const PdfCacheEntry& entry : m_pdfCache) {
+                if (entry.matches(sourceId, pdfPageNum, dpi)) {
+                    alreadyCached = true;
+                    break;
                 }
             }
+            if (alreadyCached) {
+                continue;
+            }
+            
+            QString path = m_document->pdfPathForSource(sourceId);
+            if (path.isEmpty()) {
+                continue;  // Source unavailable (will render placeholder synchronously)
+            }
+            pagesToPreload.append({ sourceId, pdfPageNum, path });
         }
     }
     
@@ -3779,7 +3784,10 @@ void DocumentViewport::doAsyncPdfPreload()
     }
     
     // Launch async render for each page that needs caching
-    for (int pdfPageNum : pagesToPreload) {
+    for (const PreloadItem& item : pagesToPreload) {
+        const QString sourceId = item.sourceId;
+        const int pdfPageNum = item.pdfPageNum;
+        const QString pdfPath = item.path;
         QFutureWatcher<QImage>* watcher = new QFutureWatcher<QImage>(this);
         
         // Track watcher for cleanup
@@ -3788,7 +3796,7 @@ void DocumentViewport::doAsyncPdfPreload()
         // THREAD SAFETY FIX: QPixmap must only be created on the main thread.
         // The background thread returns QImage, and we convert to QPixmap here
         // in the finished handler which runs on the main thread.
-        connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, pdfPageNum, dpi]() {
+        connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, sourceId, pdfPageNum, dpi]() {
             // BUG-A006 FIX: Check if watcher was cancelled (e.g., by invalidatePdfCache)
             // This happens when document/page changes while render is in progress
             m_activePdfWatchers.removeOne(watcher);
@@ -3810,7 +3818,7 @@ void DocumentViewport::doAsyncPdfPreload()
             }
             
             // Guard against document changing between render start and signal delivery
-            if (!m_document || !m_document->isPdfLoaded()) {
+            if (!m_document) {
                 return;
             }
 
@@ -3818,7 +3826,7 @@ void DocumentViewport::doAsyncPdfPreload()
             if (m_isDarkMode && m_pdfDarkModeEnabled) {
                 QVector<QRect> imgRegions;
                 if (!m_skipImageMasking) {
-                    imgRegions = m_document->pdfImageRegions(pdfPageNum, dpi);
+                    imgRegions = m_document->pdfImageRegions(sourceId, pdfPageNum, dpi);
                 }
                 DarkModeUtils::invertImageLightness(pdfImage, imgRegions);
             }
@@ -3831,12 +3839,13 @@ void DocumentViewport::doAsyncPdfPreload()
             
             // Check if already added (race condition prevention)
             for (const PdfCacheEntry& entry : m_pdfCache) {
-                if (entry.matches(pdfPageNum, dpi)) {
+                if (entry.matches(sourceId, pdfPageNum, dpi)) {
                     return;  // Already cached by another path
                 }
             }
             
             PdfCacheEntry entry;
+            entry.sourceId = sourceId;
             entry.pageIndex = pdfPageNum;
             entry.dpi = dpi;
             entry.pixmap = pixmap;
@@ -3867,7 +3876,8 @@ void DocumentViewport::doAsyncPdfPreload()
         // and can be safely passed between threads.
         QFuture<QImage> future = QtConcurrent::run([pdfPageNum, dpi, pdfPath]() -> QImage {
             // Use thread-local cached PDF provider to avoid re-opening the PDF
-            // for every page render. Each thread pool worker caches its own provider.
+            // for every page render. Each thread pool worker caches its own provider
+            // (keyed by resolved source path).
             ThreadPdfCache& cache = s_threadPdfCache.localData();
             PdfProvider* threadPdf = cache.getOrCreate(pdfPath);
             if (!threadPdf || !threadPdf->isValid()) {
@@ -3926,14 +3936,14 @@ void DocumentViewport::invalidatePdfCache()
     m_cachedDpi = 0;
 }
 
-void DocumentViewport::invalidatePdfCachePage(int pageIndex)
+void DocumentViewport::invalidatePdfCachePage(const QString& sourceId, int pageIndex)
 {
     // Thread-safe page removal
     QMutexLocker locker(&m_pdfCacheMutex);
     m_pdfCache.erase(
         std::remove_if(m_pdfCache.begin(), m_pdfCache.end(),
-                       [pageIndex](const PdfCacheEntry& entry) {
-                           return entry.pageIndex == pageIndex;
+                       [&sourceId, pageIndex](const PdfCacheEntry& entry) {
+                           return entry.pageIndex == pageIndex && entry.sourceId == sourceId;
                        }),
         m_pdfCache.end()
     );
@@ -13697,14 +13707,17 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             break;
             
         case Page::BackgroundType::PDF:
-            // Render PDF page from cache (Task 1.3.6)
-            if (m_document->isPdfLoaded() && page->pdfPageNumber >= 0) {
-                qreal dpi = effectivePdfDpi();
-                QPixmap pdfPixmap = getCachedPdfPage(page->pdfPageNumber, dpi);
-                
-                if (!pdfPixmap.isNull()) {
-                    // Scale pixmap to fit page rect
-                    painter.drawPixmap(pageRect.toRect(), pdfPixmap);
+            // Render PDF page from cache (Task 1.3.6), resolving the page's own source.
+            if (page->pdfPageNumber >= 0) {
+                PdfProvider* prov = m_document->providerForSource(page->pdfSourceId);
+                if (prov && prov->isValid()) {
+                    qreal dpi = effectivePdfDpi();
+                    QPixmap pdfPixmap = getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
+                    
+                    if (!pdfPixmap.isNull()) {
+                        // Scale pixmap to fit page rect
+                        painter.drawPixmap(pageRect.toRect(), pdfPixmap);
+                    }
                 }
             }
             break;

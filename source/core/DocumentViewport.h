@@ -174,13 +174,15 @@ struct PageHit {
  * @brief Cache entry for a rendered PDF page (Task 1.3.6).
  */
 struct PdfCacheEntry {
+    QString sourceId;       ///< PDF source id (empty = primary source)
     int pageIndex = -1;     ///< Which page this is (-1 = invalid)
     qreal dpi = 0;          ///< DPI at which it was rendered
     QPixmap pixmap;         ///< The rendered PDF image
     
     bool isValid() const { return pageIndex >= 0 && !pixmap.isNull(); }
-    bool matches(int page, qreal targetDpi) const {
+    bool matches(const QString& source, int page, qreal targetDpi) const {
         // Note: qFuzzyCompare doesn't work well near 0, so use relative comparison
+        if (sourceId != source) return false;
         if (pageIndex != page) return false;
         if (dpi == 0 || targetDpi == 0) return dpi == targetDpi;
         return qFuzzyCompare(dpi, targetDpi);
@@ -2687,7 +2689,7 @@ private:
      * @param dpi The target DPI.
      * @return Cached or freshly rendered pixmap (may be null if not a PDF page).
      */
-    QPixmap getCachedPdfPage(int pageIndex, qreal dpi);
+    QPixmap getCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi);
     
     /**
      * @brief Request PDF preload (debounced).
@@ -2711,7 +2713,7 @@ private:
      * @brief Invalidate a single page in the PDF cache.
      * @param pageIndex The page to invalidate.
      */
-    void invalidatePdfCachePage(int pageIndex);
+    void invalidatePdfCachePage(const QString& sourceId, int pageIndex);
     
     /**
      * @brief Update cache capacity based on visible pages and layout mode.

@@ -92,6 +92,33 @@ struct LayerDefinition {
 };
 
 // ============================================================================
+// PdfSource - One external/bundled PDF a document draws page backgrounds from
+// ============================================================================
+
+/**
+ * @brief A single PDF source registered with a document.
+ *
+ * A document owns an ordered list of sources. Index 0 is the "primary" source
+ * (the PDF a document was born from), which is mirrored to the legacy top-level
+ * pdf_path/pdf_hash/pdf_size manifest keys for backward compatibility. A page
+ * references its source by id via Page::pdfSourceId (empty id = primary).
+ *
+ * bundledFile / pageMap are reserved for the mini-PDF materialization step and
+ * remain unused until that later phase.
+ */
+struct PdfSource {
+    QString id;                 ///< UUID identifying this source within the document
+    QString path;               ///< Absolute path to the PDF file (may be stale -> relink)
+    QString relativePath;       ///< Path relative to the bundle dir (portable .snbx)
+    QString hash;               ///< SHA-256 of first 1MB ("sha256:...") of the original PDF
+    qint64 size = 0;            ///< File size in bytes of the original PDF
+    bool bundled = false;       ///< True if materialized into the bundle (mini-PDF)
+    QString bundledFile;        ///< Relative path of the bundled mini-PDF (when bundled)
+    QHash<int,int> pageMap;     ///< Original PDF page -> bundled-file page (when bundled)
+    bool needsRelink = false;   ///< True when the source file could not be located on load
+};
+
+// ============================================================================
 
 /**
  * @brief The central data structure representing an open notebook.
@@ -826,15 +853,15 @@ public:
     
     /**
      * @brief Check if this document has a PDF reference (path set).
-     * @return True if pdfPath is set, even if PDF is not currently loaded.
+     * @return True if the primary source has a path, even if not currently loaded.
      */
-    bool hasPdfReference() const { return !m_pdfPath.isEmpty(); }
+    bool hasPdfReference() const { const PdfSource* s = primarySource(); return s && !s->path.isEmpty(); }
     
     /**
-     * @brief Check if the PDF is currently loaded and valid.
-     * @return True if pdfProvider is valid and the PDF is loaded.
+     * @brief Check if the primary PDF is currently loaded and valid.
+     * @return True if the primary provider is valid and loaded.
      */
-    bool isPdfLoaded() const { return m_pdfProvider && m_pdfProvider->isValid(); }
+    bool isPdfLoaded() const { const PdfProvider* p = primaryProvider(); return p && p->isValid(); }
     
     /**
      * @brief Check if the PDF file exists at the referenced path.
@@ -846,7 +873,7 @@ public:
      * @brief Get the path to the referenced PDF file.
      * @return The PDF path, or empty string if no PDF is referenced.
      */
-    QString pdfPath() const { return m_pdfPath; }
+    QString pdfPath() const { const PdfSource* s = primarySource(); return s ? s->path : QString(); }
     
     /**
      * @brief Get the relative path to the PDF file.
@@ -856,13 +883,13 @@ public:
      * absolute path fails, the relative path is tried. Relative paths are
      * calculated from the document.json file location.
      */
-    QString pdfRelativePath() const { return m_pdfRelativePath; }
+    QString pdfRelativePath() const { const PdfSource* s = primarySource(); return s ? s->relativePath : QString(); }
     
     /**
-     * @brief Set the relative path to the PDF file.
+     * @brief Set the relative path to the primary PDF file.
      * @param path Relative path from document.json location.
      */
-    void setPdfRelativePath(const QString& path) { m_pdfRelativePath = path; }
+    void setPdfRelativePath(const QString& path) { if (PdfSource* s = primarySource()) s->relativePath = path; }
     
     /**
      * @brief Check if PDF needs to be relinked.
@@ -871,22 +898,25 @@ public:
      * Phase SHARE: Set by loadBundle() when PDF path resolution fails.
      * DocumentManager checks this flag and shows PdfRelinkDialog if true.
      */
-    bool needsPdfRelink() const { return m_needsPdfRelink; }
+    bool needsPdfRelink() const {
+        for (const PdfSource& s : m_pdfSources) { if (s.needsRelink) return true; }
+        return false;
+    }
     
     /**
-     * @brief Clear the PDF relink flag.
+     * @brief Clear the PDF relink flag on all sources.
      * 
      * Call after successfully relinking or if user chooses to continue without PDF.
      */
-    void clearNeedsPdfRelink() { m_needsPdfRelink = false; }
+    void clearNeedsPdfRelink() { for (PdfSource& s : m_pdfSources) s.needsRelink = false; }
     
     /**
-     * @brief Get the PDF provider for advanced operations.
+     * @brief Get the primary PDF provider for advanced operations.
      * @return Pointer to the provider, or nullptr if not loaded.
      * 
-     * Use this for accessing text boxes, links, outline, etc.
+     * Use this for accessing text boxes, links, outline, etc. (primary source).
      */
-    const PdfProvider* pdfProvider() const { return m_pdfProvider.get(); }
+    const PdfProvider* pdfProvider() const { return primaryProvider(); }
     
     /**
      * @brief Load a PDF file.
@@ -894,7 +924,7 @@ public:
      * @return True if loaded successfully.
      * 
      * If a PDF is already loaded, it will be unloaded first.
-     * Sets m_pdfPath even if loading fails (for relink functionality).
+     * Sets the primary source path even if loading fails (for relink functionality).
      */
     bool loadPdf(const QString& path);
     
@@ -943,13 +973,13 @@ public:
      * @brief Get the stored PDF hash.
      * @return Hash string, or empty if not set (legacy document).
      */
-    QString pdfHash() const { return m_pdfHash; }
+    QString pdfHash() const { const PdfSource* s = primarySource(); return s ? s->hash : QString(); }
     
     /**
      * @brief Get the stored PDF file size.
      * @return File size in bytes, or 0 if not set.
      */
-    qint64 pdfSize() const { return m_pdfSize; }
+    qint64 pdfSize() const { const PdfSource* s = primarySource(); return s ? s->size : 0; }
     
     /**
      * @brief Verify that a PDF file matches the stored hash.
@@ -967,6 +997,15 @@ public:
      * @return Rendered image, or null image if not available.
      */
     QImage renderPdfPageToImage(int pageIndex, qreal dpi = 96.0) const;
+
+    /**
+     * @brief Render a PDF page from a specific source to an image.
+     * @param sourceId Source id (empty = primary source).
+     * @param pageIndex 0-based page index within that source.
+     * @param dpi Rendering DPI (default 96 for screen).
+     * @return Rendered image, or null image if the source is not available.
+     */
+    QImage renderPdfPageToImage(const QString& sourceId, int pageIndex, qreal dpi = 96.0) const;
     
     /**
      * @brief Render a PDF page to a pixmap.
@@ -985,22 +1024,112 @@ public:
     QVector<QRect> pdfImageRegions(int pageIndex, qreal dpi = 96.0) const;
 
     /**
-     * @brief Shrink the PDF provider's internal resource cache to free memory.
+     * @brief Get bounding rectangles of raster images on a PDF page (source-aware).
+     * @param sourceId Source id (empty = primary source).
+     */
+    QVector<QRect> pdfImageRegions(const QString& sourceId, int pageIndex, qreal dpi = 96.0) const;
+
+    /**
+     * @brief Shrink every open PDF provider's internal resource cache to free memory.
      */
     void trimPdfStore() const;
 
     /**
-     * @brief Get the number of pages in the PDF.
+     * @brief Get the number of pages in the primary PDF.
      * @return Page count, or 0 if no PDF is loaded.
      */
     int pdfPageCount() const;
+
+    /**
+     * @brief Get the number of pages in a specific source's PDF.
+     * @param sourceId Source id (empty = primary source).
+     */
+    int pdfPageCount(const QString& sourceId) const;
     
     /**
-     * @brief Get the size of a PDF page.
+     * @brief Get the size of a primary PDF page.
      * @param pageIndex 0-based page index.
      * @return Page size in PDF points (72 dpi), or invalid size if not available.
      */
     QSizeF pdfPageSize(int pageIndex) const;
+
+    /**
+     * @brief Get the size of a PDF page from a specific source.
+     * @param sourceId Source id (empty = primary source).
+     */
+    QSizeF pdfPageSize(const QString& sourceId, int pageIndex) const;
+
+    // =========================================================================
+    // Multi-Source Registry (cross-document page transfer foundation)
+    // =========================================================================
+
+    /**
+     * @brief All PDF sources (index 0 is the primary). Read-only view.
+     */
+    const std::vector<PdfSource>& pdfSources() const { return m_pdfSources; }
+
+    /**
+     * @brief Number of registered PDF sources.
+     */
+    int pdfSourceCount() const { return static_cast<int>(m_pdfSources.size()); }
+
+    /**
+     * @brief Look up a source by id. Empty id resolves to the primary.
+     * @return Pointer into m_pdfSources, or nullptr if not found.
+     */
+    const PdfSource* pdfSourceById(const QString& sourceId) const;
+    PdfSource* pdfSourceById(const QString& sourceId);
+
+    /**
+     * @brief Resolve the (lazily opened) provider for a source.
+     * @param sourceId Source id (empty = primary source).
+     * @return Provider pointer, or nullptr if the source file is unavailable.
+     *
+     * The primary provider is opened eagerly on load; non-primary providers are
+     * opened on first request and cached. A missing file marks the source for relink.
+     */
+    PdfProvider* providerForSource(const QString& sourceId) const;
+
+    /**
+     * @brief Absolute path used to open a source (bundled file path when bundled).
+     * @param sourceId Source id (empty = primary source).
+     */
+    QString pdfPathForSource(const QString& sourceId) const;
+
+    /**
+     * @brief Register a PDF source, deduping by identity (hash + size).
+     * @return The id of the existing (deduped) or newly created source.
+     *
+     * If a source with a matching non-empty hash and size already exists, its id is
+     * returned and no new source is added. Otherwise a new source with a fresh UUID
+     * is appended.
+     */
+    QString registerSource(const QString& path, const QString& hash, qint64 size, bool bundled = false);
+
+    /**
+     * @brief Relink a specific source to a new file path.
+     * @param sourceId Source id (empty = primary source).
+     * @return True if the new file loaded successfully.
+     */
+    bool relinkSource(const QString& sourceId, const QString& newPath);
+
+    /**
+     * @brief Continue without a source: drop its file reference and clear its relink flag.
+     * @param sourceId Source id (empty = primary source).
+     *
+     * For the primary source this is equivalent to clearPdfReference(). For a non-primary
+     * source, its path/relative/bundled reference is cleared so pages backed by it render a
+     * blank background without repeatedly prompting for relink. The source id stays valid.
+     */
+    void dismissSourceRelink(const QString& sourceId);
+
+    /**
+     * @brief Ids of sources not referenced by any page (candidates for cleanup).
+     *
+     * Used by later plans (page delete / save cleanup). Provided here so the
+     * registry API is complete.
+     */
+    QStringList unreferencedSourceIds() const;
     
     /**
      * @brief Find the notebook page index for a given PDF page.
@@ -1446,13 +1575,29 @@ public:
     static Mode stringToMode(const QString& str);
     
 private:
-    // ===== PDF Reference (Task 1.2.4) =====
-    QString m_pdfPath;                              ///< Path to external PDF file
-    QString m_pdfRelativePath;                      ///< Relative path from document.json (Phase SHARE)
-    QString m_pdfHash;                              ///< SHA-256 hash of first 1MB (format: "sha256:...")
-    qint64 m_pdfSize = 0;                           ///< File size in bytes (for quick verification)
-    bool m_needsPdfRelink = false;                  ///< True if PDF not found at either path (Phase SHARE)
-    std::unique_ptr<PdfProvider> m_pdfProvider;    ///< Loaded PDF (may be null)
+    // ===== PDF Sources (multi-source model) =====
+    /// Ordered list of PDF sources. Index 0 is the "primary" (born-from single PDF),
+    /// mirrored to the legacy top-level pdf_path/pdf_hash/pdf_size keys on save.
+    /// Empty when the document references no PDF.
+    std::vector<PdfSource> m_pdfSources;
+    /// Lazily-opened providers keyed by source id. The primary is opened eagerly on
+    /// load; other sources open on first render. Mutable so providerForSource() (used
+    /// from const render paths) can populate the cache.
+    mutable std::map<QString, std::unique_ptr<PdfProvider>> m_pdfProviders;
+
+    // ===== Private PDF source helpers =====
+    /// The primary source (index 0), or nullptr if the document has no PDF.
+    PdfSource* primarySource() { return m_pdfSources.empty() ? nullptr : &m_pdfSources.front(); }
+    const PdfSource* primarySource() const { return m_pdfSources.empty() ? nullptr : &m_pdfSources.front(); }
+    /// Ensure a primary source exists (index 0), creating one with a fresh id if needed.
+    PdfSource& ensurePrimarySource();
+    /// The primary provider without lazy creation, or nullptr if not open.
+    PdfProvider* primaryProvider() const {
+        const PdfSource* s = primarySource();
+        if (!s) return nullptr;
+        auto it = m_pdfProviders.find(s->id);
+        return it != m_pdfProviders.end() ? it->second.get() : nullptr;
+    }
     
     // ===== Paged Mode Lazy Loading (Phase O1.7) =====
     /// Ordered list of page UUIDs. Defines page order in the document.
@@ -1468,6 +1613,11 @@ private:
     /// Only contains entries for pages with PDF backgrounds.
     /// Pages not in this map are non-PDF pages (blank, grid, lines, etc.).
     std::map<QString, int> m_pagePdfIndex;
+
+    /// PDF source id for each PDF page whose source is NOT the primary.
+    /// Key: page UUID, Value: source id. Absence = primary source (empty id).
+    /// Parallel to m_pagePdfIndex.
+    std::map<QString, QString> m_pagePdfSource;
     
     /// Currently loaded pages. Key: page UUID, Value: Page object.
     /// Mutable for lazy loading in const methods like page().

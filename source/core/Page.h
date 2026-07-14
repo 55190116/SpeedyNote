@@ -61,6 +61,7 @@ public:
     
     BackgroundType backgroundType = BackgroundType::None;
     int pdfPageNumber = -1;             ///< PDF page index if BackgroundType::PDF
+    QString pdfSourceId;                ///< PDF source id (empty = document's primary source)
     QPixmap customBackground;           ///< Custom background image if BackgroundType::Custom
     QColor backgroundColor = Qt::white; ///< Background color (used by all types)
     QColor gridColor = QColor(200, 200, 200); ///< Grid/line color
@@ -468,7 +469,7 @@ public:
      * @param pdfPage The PDF page number.
      * @return New page configured for PDF background.
      */
-    static std::unique_ptr<Page> createForPdf(const QSizeF& pageSize, int pdfPage);
+    static std::unique_ptr<Page> createForPdf(const QSizeF& pageSize, int pdfPage, const QString& sourceId = QString());
     
     // ===== Utility =====
     

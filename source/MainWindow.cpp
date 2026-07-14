@@ -3044,13 +3044,25 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         showPdfRelinkDialog(viewport);
     });
     
-    // Check if PDF is missing and show banner
+    // Check if any PDF source is missing and show banner
     Document* doc = viewport->document();
-    if (doc && doc->hasPdfReference() && !doc->isPdfLoaded()) {
-        QFileInfo pdfInfo(doc->pdfPath());
-        viewport->showMissingPdfBanner(pdfInfo.fileName());
+    bool primaryMissing = doc && doc->hasPdfReference() && !doc->isPdfLoaded();
+    if (doc && (primaryMissing || doc->needsPdfRelink())) {
+        // Prefer the primary's filename; otherwise the first source flagged for relink.
+        QString missingName;
+        if (primaryMissing) {
+            missingName = QFileInfo(doc->pdfPath()).fileName();
+        } else {
+            for (const PdfSource& s : doc->pdfSources()) {
+                if (s.needsRelink) {
+                    missingName = QFileInfo(s.path).fileName();
+                    break;
+                }
+            }
+        }
+        viewport->showMissingPdfBanner(missingName);
     } else if (doc) {
-        // PDF exists or no PDF reference - ensure banner is hidden
+        // All sources present or no PDF reference - ensure banner is hidden
         viewport->hideMissingPdfBanner();
     }
     
@@ -3290,39 +3302,68 @@ void MainWindow::showPdfRelinkDialog(DocumentViewport* viewport)
     Document* doc = viewport->document();
     if (!doc) return;
     
-    // Open PdfRelinkDialog with hash verification
-    PdfRelinkDialog dialog(doc->pdfPath(), doc->pdfHash(), doc->pdfSize(),
-                           doc->isPdfLoaded(), this);
-    if (dialog.exec() == QDialog::Accepted) {
-        PdfRelinkDialog::Result result = dialog.getResult();
-        
-        if (result == PdfRelinkDialog::RelinkPdf) {
-            QString newPath = dialog.getNewPdfPath();
-            if (!newPath.isEmpty() && doc->relinkPdf(newPath)) {
-                viewport->hideMissingPdfBanner();
-                viewport->notifyPdfChanged();
-            }
-        } else if (result == PdfRelinkDialog::ContinueWithoutPdf) {
-            doc->clearPdfReference();
-            viewport->hideMissingPdfBanner();
-            viewport->notifyPdfChanged();
+    // Collect the ids of every source that still needs relinking, primary first.
+    // (Snapshot the ids up front because relinking mutates the source list.)
+    QStringList sourceIds;
+    const std::vector<PdfSource>& sources = doc->pdfSources();
+    for (size_t i = 0; i < sources.size(); ++i) {
+        const bool isPrimary = (i == 0);
+        // The primary can be "missing" either via its relink flag or by having a
+        // reference that failed to load (legacy detection).
+        bool missing = sources[i].needsRelink;
+        if (isPrimary && !missing) {
+            missing = doc->hasPdfReference() && !doc->isPdfLoaded();
+        }
+        if (missing) {
+            sourceIds.append(sources[i].id.isEmpty() ? QString() : sources[i].id);
+        }
+    }
+    // Fallback: no flagged source but legacy primary detection triggered the request.
+    if (sourceIds.isEmpty() && doc->hasPdfReference() && !doc->isPdfLoaded()) {
+        sourceIds.append(QString());  // primary
+    }
+
+    bool anyResolved = false;
+    for (const QString& sourceId : sourceIds) {
+        const PdfSource* s = doc->pdfSourceById(sourceId);
+        QString path = s ? s->path : doc->pdfPath();
+        QString hash = s ? s->hash : doc->pdfHash();
+        qint64 size = s ? s->size : doc->pdfSize();
+
+        PdfRelinkDialog dialog(path, hash, size, /*pdfIsLoaded*/ false, this);
+        if (dialog.exec() != QDialog::Accepted) {
+            // Cancel: stop iterating, leave remaining banners in place.
+            break;
         }
 
-        if (result == PdfRelinkDialog::RelinkPdf ||
-            result == PdfRelinkDialog::ContinueWithoutPdf) {
-            updateOutlinePanelForDocument(doc);
-            if (m_pagePanel) {
-                m_pagePanel->invalidateAllThumbnails();
+        PdfRelinkDialog::Result result = dialog.getResult();
+        if (result == PdfRelinkDialog::RelinkPdf) {
+            QString newPath = dialog.getNewPdfPath();
+            if (!newPath.isEmpty() && doc->relinkSource(sourceId, newPath)) {
+                anyResolved = true;
             }
-            if (m_relinkPdfAction) {
-                if (doc->hasPdfReference()) {
-                    m_relinkPdfAction->setText(tr("Relink PDF..."));
-                } else {
-                    m_relinkPdfAction->setText(tr("Link PDF..."));
-                }
+        } else if (result == PdfRelinkDialog::ContinueWithoutPdf) {
+            doc->dismissSourceRelink(sourceId);
+            anyResolved = true;
+        }
+    }
+
+    if (anyResolved) {
+        if (!doc->needsPdfRelink()) {
+            viewport->hideMissingPdfBanner();
+        }
+        viewport->notifyPdfChanged();
+        updateOutlinePanelForDocument(doc);
+        if (m_pagePanel) {
+            m_pagePanel->invalidateAllThumbnails();
+        }
+        if (m_relinkPdfAction) {
+            if (doc->hasPdfReference()) {
+                m_relinkPdfAction->setText(tr("Relink PDF..."));
+            } else {
+                m_relinkPdfAction->setText(tr("Link PDF..."));
             }
         }
-        // Cancel: do nothing, banner remains visible
     }
 }
 
@@ -7605,13 +7646,14 @@ QPixmap MainWindow::renderPage0Thumbnail(Document* doc)
         qWarning() << "renderPage0Thumbnail: page has no layers, skipping layer rendering";
     }
     
-    // Render PDF background if available
+    // Render PDF background if available (resolve the page's own PDF source)
     QPixmap pdfBackground;
-    if (doc->isPdfLoaded() && page->pdfPageNumber >= 0) {
+    if (page->backgroundType == Page::BackgroundType::PDF && page->pdfPageNumber >= 0
+        && doc->providerForSource(page->pdfSourceId)) {
         qreal pdfDpi = (THUMBNAIL_WIDTH * dpr) / (pageSize.width() / 72.0);
         pdfDpi = qMin(pdfDpi, 150.0);  // Cap at 150 DPI
 
-        QImage pdfImage = doc->renderPdfPageToImage(page->pdfPageNumber, pdfDpi);
+        QImage pdfImage = doc->renderPdfPageToImage(page->pdfSourceId, page->pdfPageNumber, pdfDpi);
         if (!pdfImage.isNull()) {
             pdfBackground = QPixmap::fromImage(pdfImage);
         }
