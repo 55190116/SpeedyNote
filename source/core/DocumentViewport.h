@@ -3233,7 +3233,7 @@ private:
      * @brief Activate a PDF link (navigate or open URL).
      * @param link The link to activate.
      */
-    void activatePdfLink(const PdfLink& link);
+    void activatePdfLink(const PdfLink& link, int fromPageIndex);
     
     /**
      * @brief Update cursor based on hover state over PDF links.

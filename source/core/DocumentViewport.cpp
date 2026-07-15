@@ -10660,23 +10660,22 @@ void DocumentViewport::loadTextBoxesForPage(int pageIndex)
         return;
     }
     
-    // Get PDF provider
-    const PdfProvider* pdf = m_document->pdfProvider();
-    if (!pdf || !pdf->supportsTextExtraction()) {
+    // Resolve the page's own PDF source (empty id = primary), so text selection
+    // works for imported/non-primary PDF-backed pages, not just the primary PDF.
+    // Mirrors PdfSearchEngine::searchPage and the page-rendering path.
+    QString srcId;
+    int pdfPageIdx = -1;
+    if (!m_document->pdfBindingForNotebookPage(pageIndex, srcId, pdfPageIdx)) {
         return;
     }
-    
-    // Get PDF page index (may differ from document page index)
-    int pdfPageIndex = page->pdfPageNumber;
-    if (pdfPageIndex < 0) {
-        pdfPageIndex = pageIndex;  // Fallback: assume 1:1 mapping
+    const PdfProvider* pdf = m_document->providerForSource(srcId);
+    const int providerPage = m_document->resolveSourcePageIndex(srcId, pdfPageIdx);
+    if (!pdf || !pdf->supportsTextExtraction() || providerPage < 0) {
+        return;
     }
-    
-    // Load text boxes
-    m_textBoxCache = pdf->textBoxes(pdfPageIndex);
+
+    m_textBoxCache = pdf->textBoxes(providerPage);
     m_textBoxCachePageIndex = pageIndex;
-    
-    // Debug output removed - too verbose during normal use
 }
 
 void DocumentViewport::clearTextBoxCache()
@@ -10710,18 +10709,22 @@ void DocumentViewport::loadLinksForPage(int pageIndex)
         return;
     }
     
-    const PdfProvider* pdf = m_document->pdfProvider();
-    if (!pdf || !pdf->supportsLinks()) {
+    // Resolve the page's own PDF source (empty id = primary) so links resolve for
+    // imported/non-primary PDF-backed pages too. providerPage is in provider-document
+    // space (original page for external files, mini-PDF index for bundled sources).
+    QString srcId;
+    int pdfPageIdx = -1;
+    if (!m_document->pdfBindingForNotebookPage(pageIndex, srcId, pdfPageIdx)) {
         return;
     }
-    
-    int pdfPageIndex = page->pdfPageNumber;
-    if (pdfPageIndex < 0) pdfPageIndex = pageIndex;
-    
-    m_linkCache = pdf->links(pdfPageIndex);
+    const PdfProvider* pdf = m_document->providerForSource(srcId);
+    const int providerPage = m_document->resolveSourcePageIndex(srcId, pdfPageIdx);
+    if (!pdf || !pdf->supportsLinks() || providerPage < 0) {
+        return;
+    }
+
+    m_linkCache = pdf->links(providerPage);
     m_linkCachePageIndex = pageIndex;
-    
-    // Debug output removed - too verbose during normal scrolling
 }
 
 void DocumentViewport::clearLinkCache()
@@ -10754,14 +10757,25 @@ const PdfLink* DocumentViewport::findLinkAtPoint(const QPointF& pagePos, int pag
     return nullptr;
 }
 
-void DocumentViewport::activatePdfLink(const PdfLink& link)
+void DocumentViewport::activatePdfLink(const PdfLink& link, int fromPageIndex)
 {
     switch (link.type) {
         case PdfLinkType::Goto:
             {
-                // link.targetPage is a PDF page index, not notebook page index
-                // When pages are inserted between PDF pages, these differ
-                int notebookPageIndex = m_document->notebookPageIndexForPdfPage(link.targetPage);
+                // Resolve the destination within the SAME source as the clicked page.
+                // link.targetPage is in provider-document space; convert it back to an
+                // original page number, then find the notebook page showing that
+                // (source, original page). Unresolved -> no-op (e.g. the destination
+                // page was not imported into this document).
+                QString srcId;
+                int fromPdfPage = -1;
+                int notebookPageIndex = -1;
+                if (m_document->pdfBindingForNotebookPage(fromPageIndex, srcId, fromPdfPage)) {
+                    const int origTarget = m_document->originalPageForProviderIndex(srcId, link.targetPage);
+                    if (origTarget >= 0) {
+                        notebookPageIndex = m_document->notebookPageIndexForSourcePage(srcId, origTarget);
+                    }
+                }
                 if (notebookPageIndex >= 0) {
                     #ifdef SPEEDYNOTE_DEBUG
                     qDebug() << "PDF link: navigating to PDF page" << link.targetPage 
@@ -11215,7 +11229,7 @@ void DocumentViewport::handlePointerPress_Highlighter(const PointerEvent& pe)
     if (!ocrMode) {
         const PdfLink* link = findLinkAtPoint(hit.pagePoint, hit.pageIndex);
         if (link && link->type != PdfLinkType::None) {
-            activatePdfLink(*link);
+            activatePdfLink(*link, hit.pageIndex);
             m_pointerActive = false;
             updateHighlighterCursor();
             return;

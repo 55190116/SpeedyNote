@@ -749,6 +749,43 @@ bool Document::pdfBindingForNotebookPage(int notebookPageIndex, QString& outSour
     return true;
 }
 
+int Document::notebookPageIndexForSourcePage(const QString& sourceId, int originalPage) const
+{
+    if (originalPage < 0) {
+        return -1;
+    }
+    // Match live Page fields (runtime-import safe). Matching by (source, original
+    // page number) rather than position means partial/reordered imports resolve
+    // correctly; a destination not present in this document returns -1 (no-op).
+    for (int i = 0; i < pageCount(); ++i) {
+        const Page* p = page(i);
+        if (p && p->pdfPageNumber == originalPage && p->pdfSourceId == sourceId) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int Document::originalPageForProviderIndex(const QString& sourceId, int providerPage) const
+{
+    if (providerPage < 0) {
+        return -1;
+    }
+    const PdfSource* s = pdfSourceById(sourceId);
+    // External/full-file or non-bundled sources: the provider opens the original
+    // PDF, so the provider index already is the original page number.
+    if (!s || sourceUsesOriginalFile(s) || !s->bundled) {
+        return providerPage;
+    }
+    // Bundled mini-PDF: reverse the original->bundled page map.
+    for (auto it = s->pageMap.constBegin(); it != s->pageMap.constEnd(); ++it) {
+        if (it.value() == providerPage) {
+            return it.key();
+        }
+    }
+    return -1;
+}
+
 void Document::ensureAllPdfProvidersLoaded() const
 {
     for (const PdfSource& s : m_pdfSources) {

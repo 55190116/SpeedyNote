@@ -1259,6 +1259,31 @@ public:
     bool pdfBindingForNotebookPage(int notebookPageIndex, QString& outSourceId, int& outPdfPage) const;
 
     /**
+     * @brief Find the notebook page displaying a given source's original PDF page.
+     * @param sourceId PDF source id (empty = primary source).
+     * @param originalPage 0-based ORIGINAL page number within that source's PDF.
+     * @return Notebook page index, or -1 if no page in this document shows it.
+     *
+     * Source-aware reverse lookup used for internal PDF-link navigation. Matches by
+     * (pdfSourceId, pdfPageNumber) on live pages, so it is correct regardless of page
+     * order or when only a subset of a PDF's pages was imported.
+     */
+    int notebookPageIndexForSourcePage(const QString& sourceId, int originalPage) const;
+
+    /**
+     * @brief Convert a provider-document page index back to the source's original page.
+     * @param sourceId PDF source id (empty = primary source).
+     * @param providerPage Page index in the currently-open provider document.
+     * @return Original PDF page number, or -1 if it cannot be resolved.
+     *
+     * Inverse of resolveSourcePageIndex(). For external/full-file or non-bundled
+     * sources the provider index equals the original page. For a bundled mini-PDF
+     * (original file absent) it reverse-maps through PdfSource::pageMap. Used to turn
+     * a MuPDF link targetPage (provider space) into an original page number.
+     */
+    int originalPageForProviderIndex(const QString& sourceId, int providerPage) const;
+
+    /**
      * @brief Eagerly open (and cache) providers for every registered PDF source.
      *
      * Call on the main thread before dispatching background search workers so that
