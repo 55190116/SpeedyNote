@@ -64,11 +64,36 @@ struct UndoAction {
         ObjectAffinityChange,
         ObjectResize,
         ObjectTextEdit,
-        OcrLockChange
+        OcrLockChange,
+
+        // ===== Page-structure types (Plan A2) =====
+        PageDelete,             ///< One or more whole pages removed; undo restores them
+
+        // ===== Page-structure types (Plan B) =====
+        PageInsert              ///< One or more whole pages inserted (import); undo removes them
     };
 
     Type type = AddStroke;
     int layerIndex = 0;
+
+    /**
+     * @brief Snapshot of a deleted page for PageDelete undo (Plan A2).
+     *
+     * Stores the page's serialized JSON (via Page::toJson, which captures
+     * background, pdfSourceId, layers, objects, bookmarks; images embed a
+     * base64 fallback) plus the notebook index it occupied. Restored in
+     * ascending index order on undo, re-removed in descending order on redo.
+     */
+    struct DeletedPageSnapshot {
+        int index = -1;         ///< Notebook page index the page occupied
+        QJsonObject pageJson;   ///< Page::toJson() snapshot
+    };
+
+    // Page-structure payload (grouped: a batch delete/import pushes one action).
+    // For PageDelete the snapshots are the removed pages; for PageInsert they are
+    // the inserted pages (both use the same {index, pageJson} shape).
+    QVector<DeletedPageSnapshot> deletedPages;
+    int focusPageIndex = 0;     ///< Page to focus after undo/redo of a PageDelete
 
     /**
      * @brief A stroke segment residing in a single container (page or tile).
@@ -133,6 +158,7 @@ struct UndoAction {
 #include <QPointF>
 #include <QSizeF>
 #include <QRectF>
+#include <QLineF>
 #include <QVector>
 #include <QColor>
 #include <QElapsedTimer>
@@ -147,6 +173,10 @@ class QResizeEvent;
 class QMouseEvent;
 class QTabletEvent;
 class QWheelEvent;
+class QDragEnterEvent;
+class QDragMoveEvent;
+class QDragLeaveEvent;
+class QDropEvent;
 class TouchGestureHandler;
 class MissingPdfBanner;
 class LinkObject;
@@ -174,13 +204,15 @@ struct PageHit {
  * @brief Cache entry for a rendered PDF page (Task 1.3.6).
  */
 struct PdfCacheEntry {
+    QString sourceId;       ///< PDF source id (empty = primary source)
     int pageIndex = -1;     ///< Which page this is (-1 = invalid)
     qreal dpi = 0;          ///< DPI at which it was rendered
     QPixmap pixmap;         ///< The rendered PDF image
     
     bool isValid() const { return pageIndex >= 0 && !pixmap.isNull(); }
-    bool matches(int page, qreal targetDpi) const {
+    bool matches(const QString& source, int page, qreal targetDpi) const {
         // Note: qFuzzyCompare doesn't work well near 0, so use relative comparison
+        if (sourceId != source) return false;
         if (pageIndex != page) return false;
         if (dpi == 0 || targetDpi == 0) return dpi == targetDpi;
         return qFuzzyCompare(dpi, targetDpi);
@@ -673,6 +705,36 @@ public:
      * @param pageIndex First page index to clear (inclusive)
      */
     void clearUndoStacksFrom(int pageIndex);
+
+    /**
+     * @brief Delete one or more pages as a single undoable action (Plan A2).
+     *
+     * Snapshots each page (Page::toJson), removes them from the document, drops
+     * now-stale stroke/object undo history for shifted pages, and pushes one
+     * grouped PageDelete undo action so a single Ctrl+Z restores the whole set.
+     *
+     * The document's last-page guard is respected: the call fails (returns
+     * false, deleting nothing) if it would leave the document with zero pages.
+     *
+     * @param indices Notebook page indices to delete (order-independent).
+     * @return True if at least one page was deleted.
+     */
+    bool deletePagesWithUndo(const QList<int>& indices);
+
+    /**
+     * @brief Import (deep-copy) pages from another document as one undoable action (Plan B).
+     *
+     * Delegates the deep copy to Document::importPagesFrom, then pushes one
+     * grouped PageInsert undo action so a single Ctrl+Z removes the whole imported
+     * batch and Ctrl+Y re-inserts it. Emits pageStructureChangedByUndo so the UI
+     * refreshes and navigates to the insertion point.
+     *
+     * @param srcDoc The source document to copy pages from.
+     * @param srcPageUuids UUIDs of the source pages to copy, in the desired order.
+     * @param destIndex Notebook index at which to insert the copied pages.
+     * @return True if at least one page was imported.
+     */
+    bool importPagesWithUndo(Document* srcDoc, const QStringList& srcPageUuids, int destIndex);
     
     // ===== Object Undo Helpers =====
     
@@ -1771,6 +1833,30 @@ signals:
      * @param available True if redo is now available.
      */
     void redoAvailableChanged(bool available);
+
+    /**
+     * @brief Emitted when undo/redo of a PageDelete changed the page structure (Plan A2).
+     *
+     * MainWindow reacts by refreshing the page panel, navigating to
+     * @p focusPageIndex, and marking the tab modified.
+     *
+     * @param focusPageIndex Page index to scroll to after the change.
+     */
+    void pageStructureChangedByUndo(int focusPageIndex);
+
+    /**
+     * @brief Emitted when a cross-document page-transfer drag is dropped onto
+     *        this viewport (Plan D2).
+     *
+     * MainWindow resolves @p srcToken to the live source Document (by
+     * Document::sessionId()), then copies @p srcUuids into this viewport's
+     * document at @p destIndex via importPagesWithUndo, and refreshes.
+     *
+     * @param srcToken  Source document's sessionId() from the drag payload.
+     * @param srcUuids  Source page UUIDs to copy.
+     * @param destIndex 0-based insertion index in this document.
+     */
+    void pageTransferDropped(const QString& srcToken, const QStringList& srcUuids, int destIndex);
     
     /**
      * @brief Emitted when the object selection changes.
@@ -1926,6 +2012,12 @@ protected:
 #endif
     void leaveEvent(QEvent* event) override;        ///< Track pointer leaving viewport
     bool event(QEvent* event) override;  ///< Forwards touch events to handler
+
+    // Plan D2: cross-document page-transfer drop target.
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
     
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
 private slots:
@@ -2530,6 +2622,11 @@ private:
     mutable QSizeF m_cachedContentSize;   ///< Cached total content size (computed during layout)
     mutable bool m_pageLayoutDirty = true; ///< True if cache needs rebuild
     
+    // ===== Plan D2: page-transfer drop state =====
+    bool m_dropIndicatorActive = false;   ///< True while a valid transfer drag hovers
+    int m_dropInsertIndex = -1;           ///< Current 0-based insertion index [0, pageCount]
+    QLineF m_dropIndicatorLine;           ///< Indicator line in VIEWPORT coordinates
+    
     // ===== Input State (Task 1.3.8) =====
     int m_activeDrawingPage = -1;       ///< Page currently receiving strokes (-1 = none)
     bool m_pointerActive = false;       ///< True if pointer is pressed
@@ -2687,7 +2784,7 @@ private:
      * @param dpi The target DPI.
      * @return Cached or freshly rendered pixmap (may be null if not a PDF page).
      */
-    QPixmap getCachedPdfPage(int pageIndex, qreal dpi);
+    QPixmap getCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi);
     
     /**
      * @brief Request PDF preload (debounced).
@@ -2711,7 +2808,7 @@ private:
      * @brief Invalidate a single page in the PDF cache.
      * @param pageIndex The page to invalidate.
      */
-    void invalidatePdfCachePage(int pageIndex);
+    void invalidatePdfCachePage(const QString& sourceId, int pageIndex);
     
     /**
      * @brief Update cache capacity based on visible pages and layout mode.
@@ -2733,6 +2830,14 @@ private:
      * @brief Invalidate page layout cache - call when pages added/removed/resized.
      */
     void invalidatePageLayoutCache() { m_pageLayoutDirty = true; }
+    
+    /**
+     * @brief Compute the page-transfer insertion index for a drop position (Plan D2).
+     * @param viewportPos Position in viewport (widget) coordinates.
+     * @param outLineViewport Set to the indicator line in viewport coordinates.
+     * @return 0-based insertion index in [0, pageCount].
+     */
+    int dropInsertIndexAt(const QPointF& viewportPos, QLineF& outLineViewport) const;
     
     /**
      * @brief Check and apply auto-layout if enabled.
@@ -3128,7 +3233,7 @@ private:
      * @brief Activate a PDF link (navigate or open URL).
      * @param link The link to activate.
      */
-    void activatePdfLink(const PdfLink& link);
+    void activatePdfLink(const PdfLink& link, int fromPageIndex);
     
     /**
      * @brief Update cursor based on hover state over PDF links.

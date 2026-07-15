@@ -27,6 +27,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QSet>
+#include <QHash>
 #include <QPointF>
 
 #include "../../pdf/PdfProvider.h"  // For PdfOutlineItem (QVector requires complete type)
@@ -53,12 +54,34 @@ public:
 
     /**
      * @brief Set the outline data to display.
-     * @param outline The PDF outline items (hierarchical).
-     * 
+     * @param outline The (aggregated) PDF outline items (hierarchical). Each item
+     *        carries its owning sourceId and its targetPage in ORIGINAL page space
+     *        (see Document::aggregatedOutline).
+     * @param sourceSlots Per-source palette slot (sourceId -> slot). Empty for a
+     *        single-source outline, so no accent chip is drawn (OUT1 / Q13.3).
+     * @param unavailableKeys keyFor(sourceId, originalPage) for entries whose target
+     *        page is no longer present in the notebook; rendered greyed and inert.
+     *
      * Clears any existing outline and populates the tree with new data.
      * Applies default expansion state from PDF or first-level expansion.
      */
-    void setOutline(const QVector<PdfOutlineItem>& outline);
+    void setOutline(const QVector<PdfOutlineItem>& outline,
+                    const QHash<QString, int>& sourceSlots = {},
+                    const QSet<QString>& unavailableKeys = {});
+
+    /**
+     * @brief Refresh which entries are greyed/inert without rebuilding the tree.
+     * @param unavailableKeys keyFor(sourceId, originalPage) of absent targets.
+     *
+     * Preserves expansion/selection state. Call after a page delete/undo/reorder
+     * changes which PDF pages are present.
+     */
+    void updateAvailability(const QSet<QString>& unavailableKeys);
+
+    /**
+     * @brief Stable key combining a source id and an original PDF page.
+     */
+    static QString keyFor(const QString& sourceId, int originalPage);
 
     /**
      * @brief Clear the outline display.
@@ -78,13 +101,14 @@ public:
     // =========================================================================
 
     /**
-     * @brief Highlight the outline item for the given page.
-     * @param pageIndex The current page (0-based).
-     * 
-     * Uses floor-match algorithm: highlights the item with highest
-     * targetPage <= pageIndex. Auto-expands parents if panel is visible.
+     * @brief Highlight the outline item for the current page's source (OUT1).
+     * @param sourceId The current page's PDF source id (empty = primary).
+     * @param originalPage The current page's ORIGINAL PDF page (0-based).
+     *
+     * Floor-match scoped to @p sourceId: highlights the entry of that source with
+     * the highest targetPage <= originalPage. Auto-expands parents if visible.
      */
-    void highlightPage(int pageIndex);
+    void highlightPage(const QString& sourceId, int originalPage);
 
     // =========================================================================
     // State Management (for multi-tab support)
@@ -116,12 +140,13 @@ public:
 
 signals:
     /**
-     * @brief Emitted when user clicks an outline item to navigate.
-     * @param pageIndex The target page (0-based).
-     * @param position The target position within page (normalized 0-1), 
+     * @brief Emitted when user clicks an outline item to navigate (OUT1).
+     * @param sourceId The target entry's PDF source id (empty = primary).
+     * @param originalPage The target ORIGINAL PDF page (0-based) within that source.
+     * @param position The target position within page (normalized 0-1),
      *                 or (-1,-1) if not specified.
      */
-    void navigationRequested(int pageIndex, QPointF position);
+    void navigationRequested(const QString& sourceId, int originalPage, QPointF position);
 
 private slots:
     void onItemClicked(QTreeWidgetItem* item, int column);
@@ -132,7 +157,7 @@ private:
     void setupUi();
     void populateTree(const QVector<PdfOutlineItem>& items, QTreeWidgetItem* parent = nullptr);
     void applyDefaultExpansion(QTreeWidgetItem* item, const PdfOutlineItem& outlineItem);
-    QTreeWidgetItem* findItemForPage(int pageIndex);
+    QTreeWidgetItem* findItemForPage(const QString& sourceId, int originalPage);
     QString getItemPath(QTreeWidgetItem* item) const;
 
     OutlinePanelTreeWidget* m_tree = nullptr;
@@ -141,6 +166,9 @@ private:
 
     // State per document (session only)
     QSet<QString> m_expandedItems;      // Track expanded items by path
+    QHash<QString, int> m_sourceSlots;  // OUT1: sourceId -> palette slot (empty = no accent)
+    QSet<QString> m_unavailableKeys;    // OUT1: keyFor(sourceId, originalPage) absent from notebook
+    QString m_lastHighlightSource;      // OUT1: source of last highlight
     int m_lastHighlightedPage = -1;
     bool m_darkMode = false;
 
@@ -148,5 +176,8 @@ private:
     static constexpr int PageRole = Qt::UserRole;
     static constexpr int PositionXRole = Qt::UserRole + 1;
     static constexpr int PositionYRole = Qt::UserRole + 2;
+    static constexpr int UnavailableRole = Qt::UserRole + 3;  // Plan A2: greyed/inert entry
+    static constexpr int SourceIdRole = Qt::UserRole + 4;     // OUT1: owning PDF source id
+    static constexpr int SourceSlotRole = Qt::UserRole + 5;   // OUT1: palette slot (-1 = none)
 };
 

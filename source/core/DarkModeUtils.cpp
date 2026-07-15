@@ -168,4 +168,31 @@ QColor darkenColorForExport(const QColor& color)
     return QColor::fromHslF(h, s, l, a);
 }
 
+QColor sourceShade(int slot, bool darkMode)
+{
+    if (slot < 0) {
+        return QColor();  // invalid: no accent (single-source case)
+    }
+
+    // Ordered neutral grays (Q13.3: the panel uses gray shades; the scroll bar
+    // later renders the same slot as a color). Slot 0 (primary) is the strongest
+    // neutral; later slots fade. Light-mode shades read as mid grays on the
+    // #F5F5F5 panel; dark-mode shades read as light grays on the #2a2e32 panel.
+    static const QColor kLight[] = {
+        QColor("#6B7280"),  // slot 0 (primary): strongest neutral
+        QColor("#8A8F98"),  // slot 1
+        QColor("#A7ABB3"),  // slot 2
+        QColor("#C2C5CB"),  // slot 3
+    };
+    static const QColor kDark[] = {
+        QColor("#C7CDD4"),
+        QColor("#A2A8B0"),
+        QColor("#7E848C"),
+        QColor("#5E646C"),
+    };
+    constexpr int kCount = int(sizeof(kLight) / sizeof(kLight[0]));
+    const QColor* palette = darkMode ? kDark : kLight;
+    return palette[slot % kCount];
+}
+
 } // namespace DarkModeUtils

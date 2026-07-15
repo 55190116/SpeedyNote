@@ -3,6 +3,7 @@
 
 #include <QPainter>
 #include <QPainterPath>
+#include <QPolygonF>
 #include <QApplication>
 
 // ============================================================================
@@ -113,6 +114,11 @@ void PageThumbnailDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
     // 3. Draw border
     drawBorder(painter, thumbRect, isCurrentPage, isSelected, isHovered);
     
+    // 3b. Draw multi-select check badge (Plan C)
+    if (m_selectMode) {
+        drawSelectBadge(painter, thumbRect, isSelected);
+    }
+    
     // 4. Draw page number
     painter->setPen(textColor());
     QFont font = option.font;
@@ -146,6 +152,11 @@ void PageThumbnailDelegate::setPageAspectRatio(qreal ratio)
     if (ratio > 0.1 && ratio < 10.0) {
         m_pageAspectRatio = ratio;
     }
+}
+
+void PageThumbnailDelegate::setSelectMode(bool enabled)
+{
+    m_selectMode = enabled;
 }
 
 QRect PageThumbnailDelegate::thumbnailRect(const QRect& itemRect, qreal aspectRatio) const
@@ -216,6 +227,52 @@ void PageThumbnailDelegate::drawBorder(QPainter* painter, const QRect& thumbRect
     QRectF borderRect = QRectF(thumbRect).adjusted(inset, inset, -inset, -inset);
     
     painter->drawRoundedRect(borderRect, BORDER_RADIUS, BORDER_RADIUS);
+}
+
+void PageThumbnailDelegate::drawSelectBadge(QPainter* painter, const QRect& thumbRect,
+                                            bool isSelected) const
+{
+    // Circular badge in the top-left corner of the thumbnail: a hollow ring
+    // when unselected, a filled accent circle with a check when selected.
+    const int badgeSize = 20;
+    const int margin = 6;
+    const QRect badgeRect(thumbRect.left() + margin, thumbRect.top() + margin,
+                          badgeSize, badgeSize);
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, true);
+
+    if (isSelected) {
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(accentColor());
+        painter->drawEllipse(badgeRect);
+
+        // White check mark.
+        QPen checkPen(Qt::white);
+        checkPen.setWidth(2);
+        checkPen.setCapStyle(Qt::RoundCap);
+        checkPen.setJoinStyle(Qt::RoundJoin);
+        painter->setPen(checkPen);
+        painter->setBrush(Qt::NoBrush);
+        const QPointF p1(badgeRect.left() + badgeSize * 0.28, badgeRect.top() + badgeSize * 0.52);
+        const QPointF p2(badgeRect.left() + badgeSize * 0.44, badgeRect.top() + badgeSize * 0.68);
+        const QPointF p3(badgeRect.left() + badgeSize * 0.72, badgeRect.top() + badgeSize * 0.34);
+        painter->drawPolyline(QPolygonF() << p1 << p2 << p3);
+    } else {
+        // Filled backing so the ring reads over any thumbnail content.
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(m_darkMode ? QColor(30, 30, 34, 200) : QColor(255, 255, 255, 220));
+        painter->drawEllipse(badgeRect);
+
+        QPen ringPen(neutralBorderColor());
+        ringPen.setWidth(2);
+        painter->setPen(ringPen);
+        painter->setBrush(Qt::NoBrush);
+        const qreal inset = 1.0;
+        painter->drawEllipse(QRectF(badgeRect).adjusted(inset, inset, -inset, -inset));
+    }
+
+    painter->restore();
 }
 
 QColor PageThumbnailDelegate::accentColor() const

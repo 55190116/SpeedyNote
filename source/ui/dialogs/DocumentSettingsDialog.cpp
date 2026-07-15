@@ -390,7 +390,10 @@ void DocumentSettingsDialog::createThemeTab()
 
     layout->addSpacing(6);
 
-    const bool hasPdf = m_doc && m_doc->hasPdfReference();
+    // Show PDF-invert overrides for documents that have any PDF content, including
+    // import-only documents whose PDF pages were copied in from another document
+    // (they have no primary base PDF, so hasPdfReference() alone would hide these).
+    const bool hasPdf = m_doc && (m_doc->hasPdfReference() || m_doc->hasAnyPdfSource());
 
     QLabel* descLabel = new QLabel(
         tr("These PDF display settings override the global defaults for THIS "

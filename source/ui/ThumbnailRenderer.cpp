@@ -3,10 +3,31 @@
 #include "../core/Document.h"
 #include "../core/Page.h"
 #include "../layers/VectorLayer.h"
+#include "../pdf/PdfProvider.h"
 
 #include <QPainter>
 #include <QtConcurrent>
+#include <QThreadStorage>
 #include <QDebug>
+
+// Thread-local cached PDF provider (keyed by resolved source path) so worker
+// threads never touch the Document's lazy provider map. Mirrors the same pattern
+// used by DocumentViewport's async PDF preload.
+namespace {
+struct ThumbPdfCache {
+    QString pdfPath;
+    std::unique_ptr<PdfProvider> provider;
+    
+    PdfProvider* getOrCreate(const QString& path) {
+        if (pdfPath != path || !provider || !provider->isValid()) {
+            pdfPath = path;
+            provider = PdfProvider::create(path);
+        }
+        return provider.get();
+    }
+};
+QThreadStorage<ThumbPdfCache> s_thumbPdfCache;
+}
 
 ThumbnailRenderer::ThumbnailRenderer(QObject* parent)
     : QObject(parent)
@@ -223,12 +244,20 @@ ThumbnailRenderer::ThumbnailSnapshot ThumbnailRenderer::createSnapshot(
     // Store PDF info for deferred rendering in the worker thread.
     // MuPdfProvider::renderPageToImage() is already mutex-protected,
     // so calling it from a worker is safe and keeps the main thread responsive.
-    if (doc->isPdfLoaded() && page->pdfPageNumber >= 0) {
-        snapshot.doc = doc;
-        snapshot.pdfPageNumber = page->pdfPageNumber;
-        snapshot.pdfDarkMode = pdfDarkMode;
-        qreal pdfDpi = (thumbnailWidth * dpr) / (pageSize.width() / 72.0);
-        snapshot.pdfDpi = qMin(pdfDpi, 96.0);
+    if (page->backgroundType == Page::BackgroundType::PDF && page->pdfPageNumber >= 0
+        && doc->providerForSource(page->pdfSourceId)) {
+        // The worker renders directly against pdfSourcePath (the bundled mini-PDF when
+        // the source is bundled), so store the provider-facing index (pageMap-resolved).
+        const int renderPageNum = doc->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
+        if (renderPageNum >= 0) {
+            snapshot.doc = doc;
+            snapshot.pdfPageNumber = renderPageNum;
+            snapshot.pdfSourceId = page->pdfSourceId;
+            snapshot.pdfSourcePath = doc->pdfPathForSource(page->pdfSourceId);
+            snapshot.pdfDarkMode = pdfDarkMode;
+            qreal pdfDpi = (thumbnailWidth * dpr) / (pageSize.width() / 72.0);
+            snapshot.pdfDpi = qMin(pdfDpi, 96.0);
+        }
     }
     
     // Deep copy stroke data from all layers
@@ -306,17 +335,23 @@ QPixmap ThumbnailRenderer::renderFromSnapshot(const ThumbnailSnapshot& snapshot)
     
     // Render PDF background in the worker thread (deferred from createSnapshot)
     QPixmap pdfBackground;
-    if (snapshot.pdfPageNumber >= 0 && snapshot.doc && snapshot.pdfDpi > 0) {
-        QImage pdfImage = snapshot.doc->renderPdfPageToImage(snapshot.pdfPageNumber, snapshot.pdfDpi);
-        if (!pdfImage.isNull()) {
-            if (snapshot.pdfDarkMode) {
-                QVector<QRect> imgRegions = snapshot.doc->pdfImageRegions(
-                    snapshot.pdfPageNumber, snapshot.pdfDpi);
-                DarkModeUtils::invertImageLightness(pdfImage, imgRegions);
+    if (snapshot.pdfPageNumber >= 0 && !snapshot.pdfSourcePath.isEmpty() && snapshot.pdfDpi > 0) {
+        // Render via a thread-local provider keyed by the resolved source path so the
+        // worker never touches the Document's provider map from a non-main thread.
+        ThumbPdfCache& cache = s_thumbPdfCache.localData();
+        PdfProvider* threadPdf = cache.getOrCreate(snapshot.pdfSourcePath);
+        if (threadPdf && threadPdf->isValid()) {
+            QImage pdfImage = threadPdf->renderPageToImage(snapshot.pdfPageNumber, snapshot.pdfDpi);
+            if (!pdfImage.isNull()) {
+                if (snapshot.pdfDarkMode) {
+                    QVector<QRect> imgRegions = threadPdf->imageRegions(
+                        snapshot.pdfPageNumber, snapshot.pdfDpi);
+                    DarkModeUtils::invertImageLightness(pdfImage, imgRegions);
+                }
+                pdfBackground = QPixmap::fromImage(pdfImage);
             }
-            pdfBackground = QPixmap::fromImage(pdfImage);
+            threadPdf->trimStore();
         }
-        snapshot.doc->trimPdfStore();
     }
     
     QPixmap thumbnail(physicalWidth, physicalHeight);

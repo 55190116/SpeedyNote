@@ -1,4 +1,5 @@
 #include "OutlineItemDelegate.h"
+#include "../../core/DarkModeUtils.h"
 
 #include <QPainter>
 #include <QApplication>
@@ -41,6 +42,11 @@ void OutlineItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
     QString title = index.data(Qt::DisplayRole).toString();
     int pageNumber = index.data(PageRole).toInt();
     bool hasPage = pageNumber >= 0;
+    bool isUnavailable = index.data(UnavailableRole).toBool();  // Plan A2
+    // OUT1: synthetic source-root headers have no page; per-source accent slot.
+    bool isHeader = !hasPage;
+    const QVariant slotVar = index.data(SourceSlotRole);
+    int sourceSlot = slotVar.isValid() ? slotVar.toInt() : -1;
 
     // Determine colors based on state and theme
     QColor bgColor;
@@ -78,11 +84,31 @@ void OutlineItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         }
     }
 
+    // Plan A2: entries whose target page is no longer present in the notebook
+    // are dimmed (and made inert in OutlinePanel::onItemClicked).
+    if (isUnavailable) {
+        textColor = m_darkMode ? QColor("#666666") : QColor("#B0B0B0");
+        pageColor = textColor;
+    }
+
     // 1. Draw background
     painter->fillRect(option.rect, bgColor);
 
+    // OUT1: leading per-source accent chip (gray shade). Absent for single-source
+    // outlines (slot < 0) so the legacy single-PDF panel is unchanged.
+    int chipInset = 0;
+    if (sourceSlot >= 0) {
+        const QColor chip = DarkModeUtils::sourceShade(sourceSlot, m_darkMode);
+        if (chip.isValid()) {
+            QRect chipRect(option.rect.left(), option.rect.top() + 6,
+                           CHIP_WIDTH, option.rect.height() - 12);
+            painter->fillRect(chipRect, chip);
+        }
+        chipInset = CHIP_WIDTH + PADDING / 2;
+    }
+
     // 2. Calculate layout
-    QRect contentRect = option.rect.adjusted(PADDING, 0, -PADDING, 0);
+    QRect contentRect = option.rect.adjusted(PADDING + chipInset, 0, -PADDING, 0);
     
     // Page number area (right side)
     QString pageStr = hasPage ? QString::number(pageNumber + 1) : "";  // Display 1-based
@@ -95,6 +121,9 @@ void OutlineItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
 
     // 3. Draw title text (elided if needed)
     QFont titleFont = option.font;
+    if (isHeader) {
+        titleFont.setBold(true);  // OUT1: synthetic source-root header
+    }
     painter->setFont(titleFont);
     painter->setPen(textColor);
     

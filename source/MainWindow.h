@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QPointer>
 #include <QScrollBar>
+#include <QSet>
 #include <set>
 #include <QSpinBox>
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
@@ -53,6 +54,7 @@ class PdfSearchBar;
 class PdfSearchEngine;
 struct PdfSearchMatch;
 struct PdfSearchState;
+struct PdfOutlineItem;
 
 // OCR
 class OcrWorker;
@@ -384,6 +386,11 @@ private slots:
     void centerViewportContent(int tabIndex);  // Phase 3.3: One-time horizontal centering
     void updateLayerPanelForViewport(DocumentViewport* viewport);  // Phase 5.1: Update LayerPanel
     void updateOutlinePanelForDocument(Document* doc);  // Phase E.2: Update OutlinePanel for document
+    QSet<QString> computeUnavailableOutlinePages(Document* doc) const;  // OUT1: keyFor(sourceId, originalPage) of absent outline targets
+    // OUT1: same as above but reuses an already-aggregated outline to avoid a
+    // second (expensive, uncached) TOC parse when the caller already has one.
+    QSet<QString> computeUnavailableOutlinePages(Document* doc, const QVector<PdfOutlineItem>& outline) const;
+    void refreshOutlineAvailability(Document* doc);  // Plan A2: re-grey outline entries after structure change
     void updatePagePanelForViewport(DocumentViewport* viewport);  // Page Panel: Task 5.1: Update PagePanel
     void notifyPageStructureChanged(Document* doc, int currentPage = -1);  // Helper: Update PagePanel after page add/remove
     void showPdfRelinkDialog(DocumentViewport* viewport);  // Phase R.4: Unified PDF relink handler
@@ -399,6 +406,20 @@ private slots:
     void addPageToDocument();     // doc-1.0: Add page at end of document (Ctrl+Shift+A)
     void insertPageInDocument();  // Phase 3: Insert page after current (Ctrl+Shift+I)
     void deletePageInDocument();  // Phase 3B: Delete current page (Ctrl+Shift+D)
+#ifdef SPEEDYNOTE_DEBUG
+    void importPagesFromOtherDocDebug();  // Plan B temp: import pages from another open doc
+#endif
+    // Plan D1: copy the given selected pages (0-based indices in the active
+    // document) into another open document chosen via a dialog.
+    void copyPagesToOtherDocument(const QList<int>& srcRows);
+
+    // Plan D2: cross-document page-transfer drag-and-drop.
+    // Connect a viewport's pageTransferDropped signal (idempotent).
+    void connectViewportTransferSignal(DocumentViewport* vp);
+    // Handle a drop: resolve srcToken -> live Document, copy + refresh.
+    void handlePageTransferDrop(const QString& srcToken, const QStringList& srcUuids, int destIndex);
+    // Shared post-import refresh of a (possibly non-active) destination viewport.
+    void refreshDestinationAfterImport(DocumentViewport* destVp, int destIndex);
     void openPdfDocument(const QString &filePath = QString());       // doc-1.4: Open PDF file (Ctrl+Shift+O)
     bool isDarkMode();
 
@@ -774,6 +795,7 @@ private:
     QMetaObject::Connection m_pagePanelContentConn;  // For documentModified → thumbnail invalidation
     QMetaObject::Connection m_pagePanelPageModConn;  // For pageModified → targeted thumbnail invalidation
     QMetaObject::Connection m_pagePanelActionBarConn;  // For currentPageChanged → action bar sync
+    QMetaObject::Connection m_pageStructureUndoConn;   // Plan A2: PageDelete undo/redo → refresh page panel
     QMetaObject::Connection m_documentModifiedConn;    // BUG FIX: documentModified → mark doc/tab modified
     QMetaObject::Connection m_markdownNotesPageConn;  // Phase M.3: For page change → notes reload
     QMetaObject::Connection m_markdownNoteOpenConn;   // Phase M.5: For requestOpenMarkdownNote

@@ -47,9 +47,12 @@ private:
     static constexpr int PAGE_NUMBER_WIDTH = 36;
     static constexpr int PADDING = 8;
     static constexpr int DOT_SPACING = 4;
+    static constexpr int CHIP_WIDTH = 4;   // OUT1: leading per-source accent chip
 
     // Custom data roles (must match OutlinePanel)
     static constexpr int PageRole = Qt::UserRole;
+    static constexpr int UnavailableRole = Qt::UserRole + 3;  // Plan A2: greyed/inert entry
+    static constexpr int SourceSlotRole = Qt::UserRole + 5;   // OUT1: palette slot (-1 = none)
 
     bool m_darkMode = false;
 };

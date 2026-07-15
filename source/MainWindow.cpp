@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include <functional>               // Plan A2: std::function for outline walk
 #include "core/DocumentViewport.h"  // Phase 3.1: New viewport architecture
 #include "core/Document.h"          // Phase 3.1: Document class
 #include "core/Page.h"              // Phase P.4.6: For thumbnail rendering
@@ -123,6 +124,7 @@
 // #include "HandwritingLineEdit.h"
 #include "ControlPanelDialog.h"  // Phase CP.1: Re-enabled with cleaned up tabs
 #include "ui/dialogs/DocumentSettingsDialog.h"  // Per-document override panel
+#include "ui/dialogs/CopyPagesToDocDialog.h"  // Plan D1: cross-document page copy
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
 #include "SDLControllerManager.h"
 #endif
@@ -445,20 +447,35 @@ MainWindow::MainWindow(QWidget *parent)
         });
     };
 
+    // Plan D2: wire per-viewport page-transfer drop signals for BOTH panes
+    // (including background/non-active viewports). Idempotent via UniqueConnection
+    // so it can be re-run when the right pane's TabManager appears.
+    auto wireViewportTransferSignals = [this]() {
+        m_splitViewManager->forEachTabManager([this](TabManager* tm, SplitViewManager::Pane){
+            connect(tm, &TabManager::viewportCreated,
+                    this, &MainWindow::connectViewportTransferSignal,
+                    Qt::UniqueConnection);
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                connectViewportTransferSignal(tm->viewportAt(i));
+            }
+        });
+    };
+
     // Smart tool auto-switch: clear override when split view closes.
     // Also wire the freshly-created right TabManager when split turns on
     // (split-off doesn't need a re-hook: left is already wired and the
     // post-merge title refresh comes from SplitViewManager's own
     // activeViewportChanged emit at the end of destroyRightPane()).
     connect(m_splitViewManager, &SplitViewManager::splitStateChanged, this,
-            [this, wireTabTitleSignals](bool isSplit) {
+            [this, wireTabTitleSignals, wireViewportTransferSignals](bool isSplit) {
         if (!isSplit) clearToolOverride(false);
-        else wireTabTitleSignals();
+        else { wireTabTitleSignals(); wireViewportTransferSignals(); }
     });
 
     // Initial hookup for the left TabManager (created in SplitViewManager's
     // ctor); right pane gets wired lazily via splitStateChanged above.
     wireTabTitleSignals();
+    wireViewportTransferSignals();
 
     // Auto-hide the tab bar container when only one notebook is open.
     // The filename click in NavigationBar still toggles visibility as a
@@ -637,6 +654,13 @@ MainWindow::MainWindow(QWidget *parent)
                         return;
                     }
                 }
+
+                // Plan B2: on close (Save branch only), materialize imported PDF
+                // sources into bundled mini-PDFs so the .snb becomes self-contained.
+                // Never on the Discard branch (avoids persisting discarded imports).
+                if (doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                    doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
+                }
                 
                 tm->setTabTitle(index, doc->displayName());
                 tm->markTabModified(index, false);
@@ -644,6 +668,15 @@ MainWindow::MainWindow(QWidget *parent)
                 // setTabTitle/markTabModified signals above (when index is
                 // the current tab) and by activeViewportChanged after the
                 // closeTab() below switches to a sibling tab.
+            }
+        } else {
+            // Plan B2: no save prompt was shown because the document has no unsaved
+            // changes (e.g. the user pressed Ctrl+S then closed without editing). We
+            // still finalize imported PDF sources into bundled mini-PDFs here so a
+            // plain save-then-close leaves the .snb self-contained. Requires a real
+            // (non-temp) save location.
+            if (!isUsingTemp && doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
             }
         }
         
@@ -1099,6 +1132,14 @@ void MainWindow::setupUi() {
     QAction *lockAllOcrAction = overflowMenu->addAction(tr("Lock All OCR Text"));
     connect(lockAllOcrAction, &QAction::triggered, this, &MainWindow::lockAllOcrText);
 
+#ifdef SPEEDYNOTE_DEBUG
+    // Plan B temp test hook: deep-copy pages from another open document into the
+    // active one. Replaced by the D1/D2 drag-and-drop UI later.
+    overflowMenu->addSeparator();
+    QAction *importPagesDebugAction = overflowMenu->addAction(tr("Import Pages from Other Doc (Debug)..."));
+    connect(importPagesDebugAction, &QAction::triggered, this, &MainWindow::importPagesFromOtherDocDebug);
+#endif
+
 #ifndef Q_OS_MACOS
     // MAC.4 / MAC.5: hidden on macOS — the View menu's 'Go to Page...' (added
     // in MAC.5) is the canonical mouse path; Cmd+G keeps working via
@@ -1270,6 +1311,11 @@ void MainWindow::setupUi() {
         options.destPath = outputPath;
         
         QApplication::setOverrideCursor(Qt::WaitCursor);
+        // Plan B2: materialize imported PDF sources into bundled mini-PDFs before the
+        // recursive zip so the .snbx is self-contained (updates document.json + pdfs/).
+        if (doc->needsMaterialization()) {
+            doc->saveBundle(bundlePath, /*finalize=*/true);
+        }
         auto result = NotebookExporter::exportPackage(doc, options);
         QApplication::restoreOverrideCursor();
         
@@ -2506,6 +2552,10 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         disconnect(m_pagePanelActionBarConn);
         m_pagePanelActionBarConn = {};
     }
+    if (m_pageStructureUndoConn) {
+        disconnect(m_pageStructureUndoConn);
+        m_pageStructureUndoConn = {};
+    }
     // BUG FIX: Disconnect documentModified connection
     if (m_documentModifiedConn) {
         disconnect(m_documentModifiedConn);
@@ -2844,29 +2894,32 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
     if (m_leftSidebar) {
         OutlinePanel* outlinePanel = m_leftSidebar->outlinePanel();
         if (outlinePanel) {
-            // Connect viewport's currentPageChanged to outline highlighting
-            // Note: Outline stores PDF page indices, so we convert notebook page → PDF page
+            // Connect viewport's currentPageChanged to outline highlighting.
+            // OUT1: resolve the page's owning source + ORIGINAL page and highlight
+            // scoped to that source (multi-source aware, no primary PDF required).
             m_outlinePageConn = connect(viewport, &DocumentViewport::currentPageChanged,
                                         this, [outlinePanel, viewport]() {
                 Document* doc = viewport->document();
                 if (!doc) return;
                 
                 int notebookPage = viewport->currentPageIndex();
-                int pdfPage = doc->pdfPageIndexForNotebookPage(notebookPage);
-                
-                // Only highlight if current page is a PDF page
-                // For inserted blank pages, keep the previous highlight
-                if (pdfPage >= 0) {
-                    outlinePanel->highlightPage(pdfPage);
+                // OUT1: resolve the page's own source + ORIGINAL page so highlight
+                // scopes to the right source (works without a primary PDF).
+                QString srcId;
+                int origPage = -1;
+                if (doc->pdfBindingForNotebookPage(notebookPage, srcId, origPage)) {
+                    outlinePanel->highlightPage(srcId, origPage);
                 }
+                // For inserted blank pages, keep the previous highlight.
             });
             
             // Sync current page state immediately
             Document* doc = viewport->document();
             if (doc) {
-                int pdfPage = doc->pdfPageIndexForNotebookPage(viewport->currentPageIndex());
-                if (pdfPage >= 0) {
-                    outlinePanel->highlightPage(pdfPage);
+                QString srcId;
+                int origPage = -1;
+                if (doc->pdfBindingForNotebookPage(viewport->currentPageIndex(), srcId, origPage)) {
+                    outlinePanel->highlightPage(srcId, origPage);
                 }
             }
         }
@@ -2923,6 +2976,44 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         });
     }
     
+    // Plan A2: React to undo/redo of a page delete (page structure changed).
+    // Refresh the page panel, navigate to the focused page, and mark modified.
+    m_pageStructureUndoConn = connect(viewport, &DocumentViewport::pageStructureChangedByUndo,
+                                      this, [this, viewport](int focusPageIndex) {
+        if (!viewport) return;
+        Document* doc = viewport->document();
+        if (!doc) return;
+
+        viewport->notifyDocumentStructureChanged();
+
+        int newPage = qBound(0, focusPageIndex, doc->pageCount() - 1);
+        viewport->scrollToPage(newPage);
+
+        // Refresh page panel + action bar.
+        notifyPageStructureChanged(doc, newPage);
+
+        // OUT1: undo/redo of a cross-document import can add/remove a PDF source,
+        // so rebuild the outline (source roots appear/disappear) when this doc owns
+        // the panel; a plain delete/reorder only needs cheap re-greying.
+        if (currentViewport() && currentViewport()->document() == doc) {
+            updateOutlinePanelForDocument(doc);
+        } else {
+            refreshOutlineAvailability(doc);
+        }
+
+        // Mark the owning tab modified.
+        if (m_splitViewManager) {
+            m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+                for (int i = 0; i < tm->tabCount(); ++i) {
+                    if (tm->viewportAt(i) == viewport) {
+                        tm->markTabModified(i, true);
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
     // Page Panel: Task 5.3: Sync PagePanelActionBar with viewport
     if (m_pagePanelActionBar) {
         // Connect viewport's currentPageChanged to PagePanelActionBar (tracked connection)
@@ -3044,13 +3135,25 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         showPdfRelinkDialog(viewport);
     });
     
-    // Check if PDF is missing and show banner
+    // Check if any PDF source is missing and show banner
     Document* doc = viewport->document();
-    if (doc && doc->hasPdfReference() && !doc->isPdfLoaded()) {
-        QFileInfo pdfInfo(doc->pdfPath());
-        viewport->showMissingPdfBanner(pdfInfo.fileName());
+    bool primaryMissing = doc && doc->hasPdfReference() && !doc->isPdfLoaded();
+    if (doc && (primaryMissing || doc->needsPdfRelink())) {
+        // Prefer the primary's filename; otherwise the first source flagged for relink.
+        QString missingName;
+        if (primaryMissing) {
+            missingName = QFileInfo(doc->pdfPath()).fileName();
+        } else {
+            for (const PdfSource& s : doc->pdfSources()) {
+                if (s.needsRelink) {
+                    missingName = QFileInfo(s.path).fileName();
+                    break;
+                }
+            }
+        }
+        viewport->showMissingPdfBanner(missingName);
     } else if (doc) {
-        // PDF exists or no PDF reference - ensure banner is hidden
+        // All sources present or no PDF reference - ensure banner is hidden
         viewport->hideMissingPdfBanner();
     }
     
@@ -3290,39 +3393,68 @@ void MainWindow::showPdfRelinkDialog(DocumentViewport* viewport)
     Document* doc = viewport->document();
     if (!doc) return;
     
-    // Open PdfRelinkDialog with hash verification
-    PdfRelinkDialog dialog(doc->pdfPath(), doc->pdfHash(), doc->pdfSize(),
-                           doc->isPdfLoaded(), this);
-    if (dialog.exec() == QDialog::Accepted) {
-        PdfRelinkDialog::Result result = dialog.getResult();
-        
-        if (result == PdfRelinkDialog::RelinkPdf) {
-            QString newPath = dialog.getNewPdfPath();
-            if (!newPath.isEmpty() && doc->relinkPdf(newPath)) {
-                viewport->hideMissingPdfBanner();
-                viewport->notifyPdfChanged();
-            }
-        } else if (result == PdfRelinkDialog::ContinueWithoutPdf) {
-            doc->clearPdfReference();
-            viewport->hideMissingPdfBanner();
-            viewport->notifyPdfChanged();
+    // Collect the ids of every source that still needs relinking, primary first.
+    // (Snapshot the ids up front because relinking mutates the source list.)
+    QStringList sourceIds;
+    const std::vector<PdfSource>& sources = doc->pdfSources();
+    for (size_t i = 0; i < sources.size(); ++i) {
+        const bool isPrimary = (i == 0);
+        // The primary can be "missing" either via its relink flag or by having a
+        // reference that failed to load (legacy detection).
+        bool missing = sources[i].needsRelink;
+        if (isPrimary && !missing) {
+            missing = doc->hasPdfReference() && !doc->isPdfLoaded();
+        }
+        if (missing) {
+            sourceIds.append(sources[i].id.isEmpty() ? QString() : sources[i].id);
+        }
+    }
+    // Fallback: no flagged source but legacy primary detection triggered the request.
+    if (sourceIds.isEmpty() && doc->hasPdfReference() && !doc->isPdfLoaded()) {
+        sourceIds.append(QString());  // primary
+    }
+
+    bool anyResolved = false;
+    for (const QString& sourceId : sourceIds) {
+        const PdfSource* s = doc->pdfSourceById(sourceId);
+        QString path = s ? s->path : doc->pdfPath();
+        QString hash = s ? s->hash : doc->pdfHash();
+        qint64 size = s ? s->size : doc->pdfSize();
+
+        PdfRelinkDialog dialog(path, hash, size, /*pdfIsLoaded*/ false, this);
+        if (dialog.exec() != QDialog::Accepted) {
+            // Cancel: stop iterating, leave remaining banners in place.
+            break;
         }
 
-        if (result == PdfRelinkDialog::RelinkPdf ||
-            result == PdfRelinkDialog::ContinueWithoutPdf) {
-            updateOutlinePanelForDocument(doc);
-            if (m_pagePanel) {
-                m_pagePanel->invalidateAllThumbnails();
+        PdfRelinkDialog::Result result = dialog.getResult();
+        if (result == PdfRelinkDialog::RelinkPdf) {
+            QString newPath = dialog.getNewPdfPath();
+            if (!newPath.isEmpty() && doc->relinkSource(sourceId, newPath)) {
+                anyResolved = true;
             }
-            if (m_relinkPdfAction) {
-                if (doc->hasPdfReference()) {
-                    m_relinkPdfAction->setText(tr("Relink PDF..."));
-                } else {
-                    m_relinkPdfAction->setText(tr("Link PDF..."));
-                }
+        } else if (result == PdfRelinkDialog::ContinueWithoutPdf) {
+            doc->dismissSourceRelink(sourceId);
+            anyResolved = true;
+        }
+    }
+
+    if (anyResolved) {
+        if (!doc->needsPdfRelink()) {
+            viewport->hideMissingPdfBanner();
+        }
+        viewport->notifyPdfChanged();
+        updateOutlinePanelForDocument(doc);
+        if (m_pagePanel) {
+            m_pagePanel->invalidateAllThumbnails();
+        }
+        if (m_relinkPdfAction) {
+            if (doc->hasPdfReference()) {
+                m_relinkPdfAction->setText(tr("Relink PDF..."));
+            } else {
+                m_relinkPdfAction->setText(tr("Link PDF..."));
             }
         }
-        // Cancel: do nothing, banner remains visible
     }
 }
 
@@ -3493,30 +3625,100 @@ void MainWindow::updateOutlinePanelForDocument(Document* doc)
     if (!outlinePanel) {
         return;
     }
-    
-    // Case 1: No document or not a PDF document
-    if (!doc || !doc->isPdfLoaded()) {
+
+    // OUT1: aggregate the outline across every contributing PDF source (primary
+    // and imported). Works with or without a primary PDF.
+    if (!doc) {
         m_leftSidebar->showOutlineTab(false);
         outlinePanel->clearOutline();
         return;
     }
-    
-    // Case 2: PDF document but no outline
-    const PdfProvider* pdf = doc->pdfProvider();
-    if (!pdf || !pdf->hasOutline()) {
+
+    QVector<PdfOutlineItem> outline = doc->aggregatedOutline();
+    if (outline.isEmpty()) {
         m_leftSidebar->showOutlineTab(false);
         outlinePanel->clearOutline();
         return;
     }
-    
-    // Case 3: PDF with outline - show tab and load data
-    QVector<PdfOutlineItem> outline = pdf->outline();
-    outlinePanel->setOutline(outline);
+
+    // Build the sourceId -> palette-slot map, but only when more than one source
+    // contributes so single-source outlines draw no accent chip (Q13.3).
+    QHash<QString, int> sourceSlots;
+    const QStringList order = doc->sourceDisplayOrder();
+    QSet<QString> contributing;
+    std::function<void(const QVector<PdfOutlineItem>&)> collect =
+        [&](const QVector<PdfOutlineItem>& items) {
+            for (const PdfOutlineItem& it : items) {
+                contributing.insert(it.sourceId);
+                if (!it.children.isEmpty()) collect(it.children);
+            }
+        };
+    collect(outline);
+    if (contributing.size() > 1) {
+        // The palette slot IS the index in sourceDisplayOrder(); use the local
+        // `order` directly instead of paletteSlotForSource() (which would rebuild
+        // the order list for every source).
+        for (int i = 0; i < order.size(); ++i) {
+            sourceSlots.insert(order[i], i);
+        }
+    }
+
+    // Reuse the outline we just built; computing availability from it avoids a
+    // second (uncached) TOC parse of every PDF source.
+    outlinePanel->setOutline(outline, sourceSlots, computeUnavailableOutlinePages(doc, outline));
     m_leftSidebar->showOutlineTab(true);
     
 #ifdef SPEEDYNOTE_DEBUG
-    qDebug() << "Phase E.2: Loaded outline with" << outline.size() << "top-level items";
+    qDebug() << "OUT1: Loaded aggregated outline with" << outline.size()
+             << "top-level items from" << contributing.size() << "source(s)";
 #endif
+}
+
+QSet<QString> MainWindow::computeUnavailableOutlinePages(Document* doc) const
+{
+    if (!doc) {
+        return {};
+    }
+    return computeUnavailableOutlinePages(doc, doc->aggregatedOutline());
+}
+
+QSet<QString> MainWindow::computeUnavailableOutlinePages(Document* doc,
+                                                         const QVector<PdfOutlineItem>& outline) const
+{
+    // OUT1: an outline entry is "unavailable" (greyed/inert) when its target
+    // (sourceId, ORIGINAL page) is no longer present in the notebook. Keys are
+    // OutlinePanel::keyFor(sourceId, originalPage).
+    QSet<QString> unavailable;
+    if (!doc || outline.isEmpty()) {
+        return unavailable;
+    }
+
+    std::function<void(const QVector<PdfOutlineItem>&)> walk =
+        [&](const QVector<PdfOutlineItem>& items) {
+            for (const PdfOutlineItem& item : items) {
+                if (item.targetPage >= 0 &&
+                    doc->notebookPageIndexForSourcePage(item.sourceId, item.targetPage) < 0) {
+                    unavailable.insert(OutlinePanel::keyFor(item.sourceId, item.targetPage));
+                }
+                if (!item.children.isEmpty()) {
+                    walk(item.children);
+                }
+            }
+        };
+    walk(outline);
+    return unavailable;
+}
+
+void MainWindow::refreshOutlineAvailability(Document* doc)
+{
+    if (!m_leftSidebar) {
+        return;
+    }
+    OutlinePanel* outlinePanel = m_leftSidebar->outlinePanel();
+    if (!outlinePanel || !outlinePanel->hasOutline()) {
+        return;
+    }
+    outlinePanel->updateAvailability(computeUnavailableOutlinePages(doc));
 }
 
 // ============================================================================
@@ -4096,18 +4298,12 @@ void MainWindow::deletePageInDocument()
         return;
     }
     
-    // Guard 2: Cannot delete PDF pages
-    if (page->backgroundType == Page::BackgroundType::PDF) {
-        QMessageBox::information(this, tr("Cannot Delete"),
-            tr("Cannot delete PDF pages. Use an external tool to modify the PDF."));
-        return;
-            }
-    
-    // Clear undo/redo for pages >= currentPageIndex (they're shifting or being deleted)
-    viewport->clearUndoStacksFrom(currentPageIndex);
-    
-    // Delete the page
-    if (!doc->removePage(currentPageIndex)) {
+    // Plan A2: PDF pages can now be deleted (undo-only safety net; one Ctrl+Z
+    // restores the page). The single-PDF-era guard has been removed.
+    (void)page;
+
+    // Delete the page through the viewport so the deletion is undoable.
+    if (!viewport->deletePagesWithUndo({currentPageIndex})) {
 #ifdef SPEEDYNOTE_DEBUG
         qDebug() << "deletePageInDocument: Failed to delete page" << currentPageIndex;
 #endif
@@ -4134,6 +4330,268 @@ void MainWindow::deletePageInDocument()
     
     // Update PagePanel and action bar
     notifyPageStructureChanged(doc, newPage);
+
+    // Re-grey any outline entries whose PDF target page was just deleted.
+    refreshOutlineAvailability(doc);
+}
+
+#ifdef SPEEDYNOTE_DEBUG
+void MainWindow::importPagesFromOtherDocDebug()
+{
+    DocumentViewport* destVp = currentViewport();
+    if (!destVp || !destVp->document()) {
+        QMessageBox::information(this, tr("Page Import (Debug)"),
+                                 tr("No document is open in the active pane."));
+        return;
+    }
+    Document* destDoc = destVp->document();
+
+    Document* srcDoc = nullptr;
+    DocumentViewport* srcVp = nullptr;
+
+    if (m_splitViewManager) {
+        // Prefer the inactive split-pane viewport when split.
+        if (DocumentViewport* inactive = m_splitViewManager->inactiveViewport()) {
+            if (inactive->document() && inactive->document() != destDoc) {
+                srcVp = inactive;
+                srcDoc = inactive->document();
+            }
+        }
+        // Otherwise scan all tabs in both panes for a different open document.
+        if (!srcDoc) {
+            m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+                if (srcDoc) {
+                    return;
+                }
+                for (int i = 0; i < tm->tabCount(); ++i) {
+                    DocumentViewport* vp = tm->viewportAt(i);
+                    if (vp && vp->document() && vp->document() != destDoc) {
+                        srcVp = vp;
+                        srcDoc = vp->document();
+                        return;
+                    }
+                }
+            });
+        }
+    }
+
+    if (!srcDoc || !srcVp) {
+        QMessageBox::information(this, tr("Page Import (Debug)"),
+                                 tr("Open a second document in another tab or split pane to import from."));
+        return;
+    }
+
+    // Import the source's current page plus the next page (when present) to
+    // exercise grouped multi-page undo in one action.
+    QStringList srcUuids;
+    const int srcPage = srcVp->currentPageIndex();
+    if (srcPage >= 0 && srcPage < srcDoc->pageCount()) {
+        srcUuids.append(srcDoc->pageUuidAt(srcPage));
+        if (srcPage + 1 < srcDoc->pageCount()) {
+            srcUuids.append(srcDoc->pageUuidAt(srcPage + 1));
+        }
+    }
+    if (srcUuids.isEmpty()) {
+        QMessageBox::information(this, tr("Page Import (Debug)"),
+                                 tr("Source document has no pages to import."));
+        return;
+    }
+
+    const int destIndex = qMin(destVp->currentPageIndex() + 1, destDoc->pageCount());
+
+    if (!destVp->importPagesWithUndo(srcDoc, srcUuids, destIndex)) {
+        QMessageBox::warning(this, tr("Page Import (Debug)"),
+                             tr("Import failed."));
+    }
+}
+#endif
+
+void MainWindow::copyPagesToOtherDocument(const QList<int>& srcRows)
+{
+    if (srcRows.isEmpty()) {
+        return;
+    }
+
+    DocumentViewport* srcVp = currentViewport();
+    Document* srcDoc = srcVp ? srcVp->document() : nullptr;
+    if (!srcVp || !srcDoc) {
+        return;
+    }
+
+    // Resolve selected page indices to stable UUIDs (indices are momentary).
+    QStringList srcUuids;
+    for (int row : srcRows) {
+        const QString uuid = srcDoc->pageUuidAt(row);
+        if (!uuid.isEmpty()) {
+            srcUuids.append(uuid);
+        }
+    }
+    if (srcUuids.isEmpty()) {
+        return;
+    }
+
+    // Enumerate every other open, paged document across both panes.
+    struct Candidate {
+        DocumentViewport* vp = nullptr;
+        Document* doc = nullptr;
+    };
+    QVector<Candidate> candidates;
+    QHash<QString, int> nameCounts;  // for disambiguating duplicate names
+    if (m_splitViewManager) {
+        m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                DocumentViewport* vp = tm->viewportAt(i);
+                Document* doc = vp ? vp->document() : nullptr;
+                if (!doc || doc == srcDoc || doc->isEdgeless()) {
+                    continue;
+                }
+                candidates.append({vp, doc});
+                nameCounts[doc->displayName()]++;
+            }
+        });
+    }
+
+    if (candidates.isEmpty()) {
+        QMessageBox::information(this, tr("Copy Pages"),
+            tr("Open another document in a tab or split pane to copy pages into it."));
+        return;
+    }
+
+    // Build display labels; disambiguate duplicate names with the bundle folder.
+    QList<CopyPagesToDocDialog::DestEntry> entries;
+    entries.reserve(candidates.size());
+    for (const Candidate& c : candidates) {
+        QString label = c.doc->displayName();
+        if (nameCounts.value(label) > 1) {
+            const QString folder = QFileInfo(c.doc->bundlePath()).fileName();
+            if (!folder.isEmpty()) {
+                label = tr("%1 (%2)").arg(label, folder);
+            }
+        }
+        entries.append({label, c.doc->pageCount()});
+    }
+
+    CopyPagesToDocDialog dialog(entries, srcUuids.size(), this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const int chosen = dialog.selectedDocIndex();
+    if (chosen < 0 || chosen >= candidates.size()) {
+        return;
+    }
+    const Candidate& dest = candidates[chosen];
+    const int destIndex = qBound(0, dialog.insertIndex(), dest.doc->pageCount());
+
+    if (!dest.vp->importPagesWithUndo(srcDoc, srcUuids, destIndex)) {
+        QMessageBox::warning(this, tr("Copy Pages"),
+                             tr("Failed to copy the selected pages."));
+        return;
+    }
+
+    // The destination is a different (non-active) viewport, so the
+    // pageStructureChangedByUndo handler (wired only to the active viewport)
+    // does not run. Refresh the destination manually.
+    refreshDestinationAfterImport(dest.vp, destIndex);
+
+    QMessageBox::information(this, tr("Copy Pages"),
+        tr("Copied %n page(s) to \"%1\".", "", srcUuids.size())
+            .arg(dest.doc->displayName()));
+}
+
+// ============================================================================
+// Plan D2: cross-document page-transfer drag-and-drop
+// ============================================================================
+
+void MainWindow::connectViewportTransferSignal(DocumentViewport* vp)
+{
+    if (!vp) {
+        return;
+    }
+    // Idempotent: safe to call for viewports that are already wired.
+    connect(vp, &DocumentViewport::pageTransferDropped,
+            this, &MainWindow::handlePageTransferDrop,
+            Qt::UniqueConnection);
+}
+
+void MainWindow::refreshDestinationAfterImport(DocumentViewport* destVp, int destIndex)
+{
+    if (!destVp) {
+        return;
+    }
+    Document* destDoc = destVp->document();
+    if (!destDoc) {
+        return;
+    }
+
+    destVp->notifyDocumentStructureChanged();
+    destVp->scrollToPage(qBound(0, destIndex, qMax(0, destDoc->pageCount() - 1)));
+    // OUT1: a cross-document import can add a new PDF source, so fully rebuild the
+    // outline (new source roots appear) when the destination owns the panel;
+    // otherwise a tab/viewport switch rebuilds it on activation.
+    if (currentViewport() && currentViewport()->document() == destDoc) {
+        updateOutlinePanelForDocument(destDoc);
+    } else {
+        refreshOutlineAvailability(destDoc);
+    }
+
+    // Mark the owning tab modified (in whichever pane it lives).
+    if (m_splitViewManager) {
+        m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                if (tm->viewportAt(i) == destVp) {
+                    tm->markTabModified(i, true);
+                    return;
+                }
+            }
+        });
+    }
+
+    // If the destination happens to be the active viewport, also refresh the
+    // shared page panel (bound to the active document).
+    if (destVp == currentViewport()) {
+        notifyPageStructureChanged(destDoc, destVp->currentPageIndex());
+    }
+}
+
+void MainWindow::handlePageTransferDrop(const QString& srcToken,
+                                        const QStringList& srcUuids, int destIndex)
+{
+    DocumentViewport* destVp = qobject_cast<DocumentViewport*>(sender());
+    if (!destVp || !destVp->document() || srcUuids.isEmpty()) {
+        return;
+    }
+    Document* destDoc = destVp->document();
+
+    // Resolve the source token to a live open Document via its sessionId().
+    Document* srcDoc = nullptr;
+    if (m_splitViewManager) {
+        m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+            if (srcDoc) {
+                return;
+            }
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                DocumentViewport* vp = tm->viewportAt(i);
+                Document* doc = vp ? vp->document() : nullptr;
+                if (doc && doc->sessionId() == srcToken) {
+                    srcDoc = doc;
+                    return;
+                }
+            }
+        });
+    }
+
+    // Guard: source no longer open, or same-document drop (defensive).
+    if (!srcDoc || srcDoc == destDoc) {
+        return;
+    }
+
+    const int clampedIndex = qBound(0, destIndex, destDoc->pageCount());
+    if (!destVp->importPagesWithUndo(srcDoc, srcUuids, clampedIndex)) {
+        return;
+    }
+
+    refreshDestinationAfterImport(destVp, clampedIndex);
 }
 
 void MainWindow::openPdfDocument(const QString &filePath)
@@ -7154,16 +7612,7 @@ void MainWindow::setupPagePanelActionBar()
                 
                 int pageIndex = vp->currentPageIndex();
                 
-                // BUG-PG-001 FIX: Can't delete PDF background pages
-                Page* page = doc->page(pageIndex);
-                if (page && page->backgroundType == Page::BackgroundType::PDF) {
-#ifdef SPEEDYNOTE_DEBUG
-                    qDebug() << "Page Panel: Cannot delete PDF page" << pageIndex;
-#endif
-                    m_pagePanelActionBar->resetDeleteButton();
-                    return;
-                }
-                
+                // Plan A2: PDF pages can now be deleted (undo-only safety net).
                 // Store page index for deferred deletion
                 // Actual deletion happens in deleteConfirmed handler
                 m_pendingDeletePageIndex = pageIndex;
@@ -7201,16 +7650,8 @@ void MainWindow::setupPagePanelActionBar()
             return;
         }
         
-        // Double-check PDF protection (page may have changed)
-        Page* page = doc->page(m_pendingDeletePageIndex);
-        if (page && page->backgroundType == Page::BackgroundType::PDF) {
-#ifdef SPEEDYNOTE_DEBUG
-            qDebug() << "Page Panel: Cannot delete PDF page" << m_pendingDeletePageIndex;
-#endif
-            m_pendingDeletePageIndex = -1;
-            return;
-        }
-        
+        // Plan A2: PDF pages can now be deleted (undo-only safety net).
+
         // Can't delete the last page
         if (doc->pageCount() <= 1) {
 #ifdef SPEEDYNOTE_DEBUG
@@ -7220,9 +7661,9 @@ void MainWindow::setupPagePanelActionBar()
             return;
         }
                 
-                // Actually delete the page
+                // Actually delete the page (undoable via Ctrl+Z)
         int deleteIndex = m_pendingDeletePageIndex;
-        if (doc->removePage(deleteIndex)) {
+        if (vp->deletePagesWithUndo({deleteIndex})) {
 #ifdef SPEEDYNOTE_DEBUG
             qDebug() << "Page Panel: Page" << deleteIndex << "permanently deleted";
 #endif
@@ -7234,6 +7675,9 @@ void MainWindow::setupPagePanelActionBar()
             
             // Update UI
             notifyPageStructureChanged(doc, newPage);
+
+            // Re-grey any outline entries whose PDF target page was just deleted.
+            refreshOutlineAvailability(doc);
             
             // Mark tab as modified (page deleted)
             int tabIndex = tabManager()->currentIndex();
@@ -7336,20 +7780,20 @@ void MainWindow::setupOutlinePanelConnections()
         return;
     }
     
-    // Navigation: OutlinePanel → DocumentViewport
-    // Note: pageIndex from outline is a PDF page index, not notebook page index
-    // When pages are inserted between PDF pages, these differ
+    // Navigation: OutlinePanel → DocumentViewport (OUT1, source-aware).
+    // The entry carries its source id and an ORIGINAL PDF page; resolve to the
+    // notebook page that shows that source page (correct for partial/reordered
+    // imports and documents without a primary PDF).
     connect(outlinePanel, &OutlinePanel::navigationRequested,
-            this, [this](int pdfPageIndex, QPointF position) {
+            this, [this](const QString& sourceId, int originalPage, QPointF position) {
         if (DocumentViewport* vp = currentViewport()) {
             Document* doc = vp->document();
             if (!doc) return;
-            
-            // Convert PDF page index to notebook page index
-            int notebookPageIndex = doc->notebookPageIndexForPdfPage(pdfPageIndex);
+
+            int notebookPageIndex = doc->notebookPageIndexForSourcePage(sourceId, originalPage);
             if (notebookPageIndex < 0) {
-                qWarning() << "Outline navigation: PDF page" << pdfPageIndex 
-                           << "not found in notebook";
+                qWarning() << "Outline navigation: source" << sourceId
+                           << "page" << originalPage << "not found in notebook";
                 return;
             }
             
@@ -7404,6 +7848,10 @@ void MainWindow::setupPagePanelConnections()
                     if (m_pagePanel) {
                         m_pagePanel->invalidateAllThumbnails();
                     }
+
+                    // Outline targets are position-independent, but recompute
+                    // greying defensively after any structure change (Plan A2).
+                    refreshOutlineAvailability(doc);
                     
                     // Mark tab as modified (page order changed)
                     int tabIndex = tabManager()->currentIndex();
@@ -7417,6 +7865,64 @@ void MainWindow::setupPagePanelConnections()
                 }
             }
         }
+    });
+    
+    // -------------------------------------------------------------------------
+    // Multi-select mode (Plan C)
+    // -------------------------------------------------------------------------
+    
+    // Action-bar Select toggle → drive the panel's select mode.
+    if (m_pagePanelActionBar) {
+        connect(m_pagePanelActionBar, &PagePanelActionBar::selectModeToggled,
+                this, [this](bool on) {
+            if (m_pagePanel) {
+                m_pagePanel->setSelectMode(on);
+            }
+        });
+    }
+    
+    // Panel exits select mode internally (e.g. document switch) → resync toggle.
+    connect(pagePanel, &PagePanel::selectModeChanged, this, [this](bool on) {
+        if (m_pagePanelActionBar) {
+            m_pagePanelActionBar->setSelectModeChecked(on);
+        }
+    });
+    
+    // Delete the selected pages as a single grouped-undo action.
+    connect(pagePanel, &PagePanel::deleteSelectedRequested, this,
+            [this](const QList<int>& indices) {
+        DocumentViewport* vp = currentViewport();
+        if (!vp) {
+            return;
+        }
+        Document* doc = vp->document();
+        if (!doc) {
+            return;
+        }
+        // deletePagesWithUndo() already refuses to delete every page and dedups.
+        if (vp->deletePagesWithUndo(indices)) {
+            vp->notifyDocumentStructureChanged();
+            const int newPage = qBound(0, vp->currentPageIndex(), doc->pageCount() - 1);
+            vp->scrollToPage(newPage);
+            notifyPageStructureChanged(doc, newPage);
+            refreshOutlineAvailability(doc);
+            if (tabManager()) {
+                int tabIndex = tabManager()->currentIndex();
+                if (tabIndex >= 0) {
+                    tabManager()->markTabModified(tabIndex, true);
+                }
+            }
+        }
+        // Selection indices are now stale regardless of success.
+        if (m_pagePanel) {
+            m_pagePanel->clearSelectionAfterDelete();
+        }
+    });
+    
+    // Copy the selected pages into another open document (Plan D1).
+    connect(pagePanel, &PagePanel::copySelectedRequested, this,
+            [this](const QList<int>& indices) {
+        copyPagesToOtherDocument(indices);
     });
     
 #ifdef SPEEDYNOTE_DEBUG
@@ -7605,13 +8111,14 @@ QPixmap MainWindow::renderPage0Thumbnail(Document* doc)
         qWarning() << "renderPage0Thumbnail: page has no layers, skipping layer rendering";
     }
     
-    // Render PDF background if available
+    // Render PDF background if available (resolve the page's own PDF source)
     QPixmap pdfBackground;
-    if (doc->isPdfLoaded() && page->pdfPageNumber >= 0) {
+    if (page->backgroundType == Page::BackgroundType::PDF && page->pdfPageNumber >= 0
+        && doc->providerForSource(page->pdfSourceId)) {
         qreal pdfDpi = (THUMBNAIL_WIDTH * dpr) / (pageSize.width() / 72.0);
         pdfDpi = qMin(pdfDpi, 150.0);  // Cap at 150 DPI
 
-        QImage pdfImage = doc->renderPdfPageToImage(page->pdfPageNumber, pdfDpi);
+        QImage pdfImage = doc->renderPdfPageToImage(page->pdfSourceId, page->pdfPageNumber, pdfDpi);
         if (!pdfImage.isNull()) {
             pdfBackground = QPixmap::fromImage(pdfImage);
         }
@@ -8698,6 +9205,19 @@ void MainWindow::closeEvent(QCloseEvent *event) {
                                 return false;
                             }
                         }
+
+                        // Plan B2: materialize imported PDF sources into bundled
+                        // mini-PDFs on quit (Save branch only) so the .snb is portable.
+                        if (doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                            doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
+                        }
+                    }
+                } else {
+                    // Plan B2: no prompt because there are no unsaved changes (e.g.
+                    // Ctrl+S then quit without editing). Still finalize imported PDF
+                    // sources into bundled mini-PDFs, provided a real save location.
+                    if (!isUsingTemp && doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                        doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
                     }
                 }
             }

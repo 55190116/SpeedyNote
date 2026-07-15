@@ -124,6 +124,8 @@ private:
         // PDF background info (rendered in worker thread, not on main thread)
         Document* doc = nullptr;
         int pdfPageNumber = -1;
+        QString pdfSourceId;        // PDF source id (empty = primary source)
+        QString pdfSourcePath;      // Resolved file path used to open the source in the worker
         qreal pdfDpi = 0;
         bool pdfDarkMode = false;
         

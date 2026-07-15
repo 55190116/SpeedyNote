@@ -53,6 +53,17 @@ public:
     bool isDarkMode() const { return m_darkMode; }
     
     /**
+     * @brief Enable multi-select visuals (per-item check badge).
+     * @param enabled True to draw selection check badges.
+     */
+    void setSelectMode(bool enabled);
+    
+    /**
+     * @brief Whether multi-select visuals are enabled.
+     */
+    bool isSelectMode() const { return m_selectMode; }
+    
+    /**
      * @brief Set the default page aspect ratio.
      * @param ratio Height / Width ratio (default: US Letter ≈ 1.294)
      */
@@ -111,8 +122,15 @@ private:
      */
     QColor backgroundColor(bool isSelected, bool isHovered) const;
 
+    /**
+     * @brief Draw the multi-select check badge in the thumbnail corner.
+     */
+    void drawSelectBadge(QPainter* painter, const QRect& thumbRect,
+                         bool isSelected) const;
+
     int m_thumbnailWidth = 150;
     bool m_darkMode = false;
+    bool m_selectMode = false;
     qreal m_pageAspectRatio = 1.294;  // Default: US Letter (1056/816)
     
     // Visual constants

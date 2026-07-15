@@ -946,6 +946,7 @@ set(PDF_SOURCES
     source/pdf/PdfMismatchDialog.cpp
     source/pdf/PdfSearchEngine.cpp
     source/pdf/MuPdfExporter.cpp
+    source/pdf/PdfMaterializer.cpp
 )
 message(STATUS "   PDF provider: MuPDF (all platforms)")
 
@@ -1052,6 +1053,8 @@ set(APP_SOURCES
         source/MainWindow.cpp
     source/ControlPanelDialog.cpp
     source/ui/dialogs/KeyCaptureDialog.cpp
+    source/ui/dialogs/PageRangeSelectDialog.cpp
+    source/ui/dialogs/CopyPagesToDocDialog.cpp
     source/ui/dialogs/BatchPdfExportDialog.cpp
     source/ui/dialogs/BatchSnbxExportDialog.cpp
     source/ui/dialogs/ExportResultsDialog.cpp

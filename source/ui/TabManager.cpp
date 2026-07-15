@@ -82,6 +82,10 @@ int TabManager::createTab(Document* doc, const QString& title)
     // Manually sync viewport stack (since we blocked the signal that normally does this)
     m_viewportStack->setCurrentIndex(index);
     
+    // Plan D2: let listeners wire per-viewport signals (e.g. page-transfer
+    // drops) for every viewport, not just the active one.
+    emit viewportCreated(viewport);
+    
     // Manually emit currentViewportChanged now that everything is set up
     emit currentViewportChanged(viewport);
     

@@ -230,6 +230,12 @@ BatchResult exportSnbxBatch(const QStringList& bundlePaths,
             continue;
         }
         
+        // Plan B2: materialize imported PDF sources into bundled mini-PDFs before the
+        // recursive zip so the exported .snbx is self-contained.
+        if (doc->needsMaterialization()) {
+            doc->saveBundle(bundlePath, /*finalize=*/true);
+        }
+        
         // Prepare export options
         NotebookExporter::ExportOptions exportOpts;
         exportOpts.destPath = outputPath;

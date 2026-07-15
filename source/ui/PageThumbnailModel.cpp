@@ -465,16 +465,14 @@ bool PageThumbnailModel::isPdfPage(int pageIndex) const
 
 bool PageThumbnailModel::canDragPage(int pageIndex) const
 {
-    if (!m_document) {
+    if (!m_document || pageIndex < 0 || pageIndex >= m_document->pageCount()) {
         return false;
     }
-    
-    // In a PDF document, only inserted (non-PDF) pages can be dragged
-    if (m_document->hasPdfReference()) {
-        return !isPdfPage(pageIndex);
-    }
-    
-    // In a non-PDF document, all pages can be dragged
+
+    // Plan A2: all pages (primary-PDF, imported-PDF, and blank) can be
+    // reordered. A page resolves its background from its explicit
+    // (pdfSourceId, pdfPageNumber), never from its position in page_order,
+    // so reordering is lossless.
     return true;
 }
 

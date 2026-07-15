@@ -712,6 +712,10 @@ QJsonObject Page::toJson() const
     // Background
     obj["backgroundType"] = static_cast<int>(backgroundType);
     obj["pdfPageNumber"] = pdfPageNumber;
+    // Only written for non-primary sources so existing single-PDF pages stay byte-identical.
+    if (!pdfSourceId.isEmpty()) {
+        obj["pdfSourceId"] = pdfSourceId;
+    }
     obj["backgroundColor"] = backgroundColor.name(QColor::HexArgb);
     obj["gridColor"] = gridColor.name(QColor::HexRgb);  // Use 6-char hex (#RRGGBB) for clarity
     obj["gridSpacing"] = gridSpacing;
@@ -771,6 +775,7 @@ std::unique_ptr<Page> Page::fromJson(const QJsonObject& obj)
     // Background
     page->backgroundType = static_cast<BackgroundType>(obj["backgroundType"].toInt(0));
     page->pdfPageNumber = obj["pdfPageNumber"].toInt(-1);
+    page->pdfSourceId = obj["pdfSourceId"].toString();  // empty = primary source
     page->backgroundColor = QColor(obj["backgroundColor"].toString("#ffffffff"));
     page->gridColor = QColor(obj["gridColor"].toString("#c8c8c8"));  // Gray (200,200,200) in 6-char hex
     page->gridSpacing = obj["gridSpacing"].toInt(32);
@@ -857,11 +862,12 @@ std::unique_ptr<Page> Page::createDefault(const QSizeF& pageSize)
     return page;
 }
 
-std::unique_ptr<Page> Page::createForPdf(const QSizeF& pageSize, int pdfPage)
+std::unique_ptr<Page> Page::createForPdf(const QSizeF& pageSize, int pdfPage, const QString& sourceId)
 {
     auto page = std::make_unique<Page>(pageSize);
     page->backgroundType = BackgroundType::PDF;
     page->pdfPageNumber = pdfPage;
+    page->pdfSourceId = sourceId;
     return page;
 }
 

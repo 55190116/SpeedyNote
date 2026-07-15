@@ -46,6 +46,11 @@
 #include <QPlainTextEdit>  // For text input focus check
 #include <QElapsedTimer>  // For double/triple click detection (Phase A)
 #include <QMimeData>      // For clipboard content type check (O2.4)
+#include <QDragEnterEvent> // Plan D2: cross-document page-transfer drops
+#include <QDragMoveEvent>
+#include <QDragLeaveEvent>
+#include <QDropEvent>
+#include "PageTransferMime.h"
 
 #ifdef Q_OS_ANDROID
 #include <QJniObject>       // BUG-A008: JNI for eraser tool type detection
@@ -144,6 +149,9 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     // Note: Touch-synthesized mouse events are still rejected in mouse handlers
     // to prevent touch from triggering drawing (drawing is stylus/mouse only)
     setAttribute(Qt::WA_AcceptTouchEvents, true);
+    
+    // Plan D2: accept cross-document page-transfer drops onto the canvas.
+    setAcceptDrops(true);
     
     // Set focus policy for keyboard shortcuts
     setFocusPolicy(Qt::StrongFocus);
@@ -2521,8 +2529,250 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         drawEraserCursor(painter);
     }
     
+    // Plan D2: cross-document page-transfer drop insertion indicator.
+    if (m_dropIndicatorActive && !m_dropIndicatorLine.isNull()) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        QPen indicatorPen(QColor(0, 122, 255), 3.0);
+        indicatorPen.setCosmetic(true);
+        indicatorPen.setCapStyle(Qt::RoundCap);
+        painter.setPen(indicatorPen);
+        painter.drawLine(m_dropIndicatorLine);
+        painter.restore();
+    }
+    
     // Debug overlay is now handled by DebugOverlay widget (source/ui/DebugOverlay.cpp)
     // Toggle with Ctrl+Shift+D
+}
+
+// ============================================================================
+// Plan D2: cross-document page-transfer drop target
+// ============================================================================
+
+// Decode the payload and reject same-document / edgeless / empty drags.
+static bool acceptablePageTransfer(const QMimeData* mime, const Document* destDoc,
+                                   QString* outToken = nullptr,
+                                   QStringList* outUuids = nullptr)
+{
+    if (!mime || !destDoc || destDoc->isEdgeless()) {
+        return false;
+    }
+    if (!mime->hasFormat(PageTransfer::mimeType())) {
+        return false;
+    }
+    QString token;
+    QStringList uuids;
+    if (!PageTransfer::decode(mime->data(PageTransfer::mimeType()), token, uuids)) {
+        return false;
+    }
+    // Defensive: two viewports should never show the same document, but reject
+    // a same-document drop to avoid accidental self-duplication.
+    if (token == destDoc->sessionId()) {
+        return false;
+    }
+    if (outToken) *outToken = token;
+    if (outUuids) *outUuids = uuids;
+    return true;
+}
+
+void DocumentViewport::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (acceptablePageTransfer(event->mimeData(), m_document)) {
+        m_dropIndicatorActive = true;
+        event->setDropAction(Qt::CopyAction);
+        event->acceptProposedAction();
+        return;
+    }
+    m_dropIndicatorActive = false;
+    event->ignore();
+}
+
+void DocumentViewport::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (!acceptablePageTransfer(event->mimeData(), m_document)) {
+        event->ignore();
+        return;
+    }
+    QLineF line;
+    m_dropInsertIndex = dropInsertIndexAt(event->position(), line);
+    m_dropIndicatorLine = line;
+    m_dropIndicatorActive = true;
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+    update();
+}
+
+void DocumentViewport::dragLeaveEvent(QDragLeaveEvent* event)
+{
+    Q_UNUSED(event);
+    if (m_dropIndicatorActive) {
+        m_dropIndicatorActive = false;
+        m_dropInsertIndex = -1;
+        m_dropIndicatorLine = QLineF();
+        update();
+    }
+}
+
+void DocumentViewport::dropEvent(QDropEvent* event)
+{
+    QString token;
+    QStringList uuids;
+    const bool ok = acceptablePageTransfer(event->mimeData(), m_document, &token, &uuids);
+
+    // Clear indicator regardless of outcome.
+    const int destIndex = m_dropInsertIndex >= 0
+        ? m_dropInsertIndex
+        : (m_document ? m_document->pageCount() : 0);
+    m_dropIndicatorActive = false;
+    m_dropInsertIndex = -1;
+    m_dropIndicatorLine = QLineF();
+    update();
+
+    if (!ok) {
+        event->ignore();
+        return;
+    }
+
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+    emit pageTransferDropped(token, uuids, destIndex);
+}
+
+int DocumentViewport::dropInsertIndexAt(const QPointF& viewportPos, QLineF& outLineViewport) const
+{
+    outLineViewport = QLineF();
+    if (!m_document) {
+        return 0;
+    }
+    const int pageCount = m_document->pageCount();
+    if (pageCount == 0) {
+        return 0;
+    }
+
+    ensurePageLayoutCache();
+    const QPointF docPt = viewportToDocument(viewportPos);
+    const qreal contentWidth = totalContentSize().width();
+
+    // Helper to build a horizontal indicator line (viewport coords) at a
+    // document-space Y spanning the content width.
+    auto horizontalLine = [&](qreal docY) {
+        const QPointF a = documentToViewport(QPointF(0, docY));
+        const QPointF b = documentToViewport(QPointF(contentWidth, docY));
+        return QLineF(a, b);
+    };
+
+    if (m_layoutMode == LayoutMode::SingleColumn) {
+        // Binary search (O(log n)) for the last page whose top Y is at or above
+        // docPt.y(), mirroring pageAtPoint()'s approach for large PDFs. The
+        // insertion point is before that page if the point is in its upper half,
+        // otherwise after it.
+        int cand = -1;
+        if (!m_pageYCache.isEmpty()) {
+            int lo = 0, hi = pageCount - 1;
+            const qreal y = docPt.y();
+            while (lo <= hi) {
+                const int mid = (lo + hi) / 2;
+                if (m_pageYCache[mid] <= y) {
+                    cand = mid;
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
+            }
+        }
+
+        int index;
+        if (cand < 0) {
+            index = 0;
+        } else if (docPt.y() <= pageRect(cand).center().y()) {
+            index = cand;
+        } else {
+            index = cand + 1;
+        }
+        index = qBound(0, index, pageCount);
+
+        qreal boundaryY;
+        if (index == 0) {
+            boundaryY = pageRect(0).top();
+        } else if (index >= pageCount) {
+            boundaryY = pageRect(pageCount - 1).bottom();
+        } else {
+            boundaryY = (pageRect(index - 1).bottom() + pageRect(index).top()) / 2.0;
+        }
+        outLineViewport = horizontalLine(boundaryY);
+        return index;
+    }
+
+    // TwoColumn: rows of two pages (left = even index, right = odd index).
+    const int numRows = (pageCount + 1) / 2;
+
+    // Find the row whose vertical span contains docPt.y(), else the nearest.
+    int row = -1;
+    for (int r = 0; r < numRows; ++r) {
+        const int leftIdx = r * 2;
+        QRectF leftRect = pageRect(leftIdx);
+        const int rightIdx = leftIdx + 1;
+        qreal rowTop = leftRect.top();
+        qreal rowBottom = leftRect.bottom();
+        if (rightIdx < pageCount) {
+            QRectF rightRect = pageRect(rightIdx);
+            rowTop = qMin(rowTop, rightRect.top());
+            rowBottom = qMax(rowBottom, rightRect.bottom());
+        }
+        if (docPt.y() < rowTop) {
+            // Above this row -> insert before the row (horizontal indicator).
+            outLineViewport = horizontalLine(rowTop);
+            return qBound(0, leftIdx, pageCount);
+        }
+        if (docPt.y() <= rowBottom) {
+            row = r;
+            break;
+        }
+    }
+
+    if (row < 0) {
+        // Below the last row -> append at end.
+        const int lastIdx = pageCount - 1;
+        outLineViewport = horizontalLine(pageRect(lastIdx).bottom());
+        return pageCount;
+    }
+
+    const int leftIdx = row * 2;
+    const int rightIdx = leftIdx + 1;
+    const QRectF leftRect = pageRect(leftIdx);
+
+    // Vertical indicator line spanning the row's page height at a given docX.
+    auto verticalLine = [&](qreal docX, const QRectF& rect) {
+        const QPointF a = documentToViewport(QPointF(docX, rect.top()));
+        const QPointF b = documentToViewport(QPointF(docX, rect.bottom()));
+        return QLineF(a, b);
+    };
+
+    if (rightIdx >= pageCount) {
+        // Only a left page in this (last) row: before or after it.
+        if (docPt.x() < leftRect.center().x()) {
+            outLineViewport = verticalLine(leftRect.left(), leftRect);
+            return qBound(0, leftIdx, pageCount);
+        }
+        outLineViewport = verticalLine(leftRect.right(), leftRect);
+        return qBound(0, leftIdx + 1, pageCount);
+    }
+
+    const QRectF rightRect = pageRect(rightIdx);
+    if (docPt.x() < leftRect.center().x()) {
+        // Before the left page.
+        outLineViewport = verticalLine(leftRect.left(), leftRect);
+        return qBound(0, leftIdx, pageCount);
+    }
+    if (docPt.x() < rightRect.center().x()) {
+        // Between the two pages.
+        const qreal midX = (leftRect.right() + rightRect.left()) / 2.0;
+        outLineViewport = verticalLine(midX, leftRect);
+        return qBound(0, rightIdx, pageCount);
+    }
+    // After the right page.
+    outLineViewport = verticalLine(rightRect.right(), rightRect);
+    return qBound(0, rightIdx + 1, pageCount);
 }
 
 void DocumentViewport::resizeEvent(QResizeEvent* event)
@@ -3622,18 +3872,18 @@ bool DocumentViewport::event(QEvent* event)
 
 // ===== PDF Cache Helpers (Task 1.3.6) =====
 
-QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
+QPixmap DocumentViewport::getCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi)
 {
-    if (!m_document || !m_document->isPdfLoaded()) {
+    if (!m_document) {
         return QPixmap();
     }
     
     // Thread-safe cache lookup
     QMutexLocker locker(&m_pdfCacheMutex);
     
-    // Check if we have this page cached at the right DPI
+    // Check if we have this page cached at the right DPI (and source)
     for (const PdfCacheEntry& entry : m_pdfCache) {
-        if (entry.matches(pageIndex, dpi)) {
+        if (entry.matches(sourceId, pageIndex, dpi)) {
             return entry.pixmap;  // Cache hit - fast path
         }
     }
@@ -3657,7 +3907,7 @@ QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
 #endif
     
     // Render the page (expensive operation - done outside mutex)
-    QImage pdfImage = m_document->renderPdfPageToImage(pageIndex, dpi);
+    QImage pdfImage = m_document->renderPdfPageToImage(sourceId, pageIndex, dpi);
     if (pdfImage.isNull()) {
         return QPixmap();
     }
@@ -3666,7 +3916,7 @@ QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
     if (m_isDarkMode && m_pdfDarkModeEnabled) {
         QVector<QRect> imgRegions;
         if (!m_skipImageMasking) {
-            imgRegions = m_document->pdfImageRegions(pageIndex, dpi);
+            imgRegions = m_document->pdfImageRegions(sourceId, pageIndex, dpi);
         }
         DarkModeUtils::invertImageLightness(pdfImage, imgRegions);
     }
@@ -3680,12 +3930,13 @@ QPixmap DocumentViewport::getCachedPdfPage(int pageIndex, qreal dpi)
     
     // Double-check it wasn't added by another thread while we were rendering
     for (const PdfCacheEntry& entry : m_pdfCache) {
-        if (entry.matches(pageIndex, dpi)) {
+        if (entry.matches(sourceId, pageIndex, dpi)) {
             return entry.pixmap;  // Another thread added it
         }
     }
     
     PdfCacheEntry entry;
+    entry.sourceId = sourceId;
     entry.pageIndex = pageIndex;
     entry.dpi = dpi;
     entry.pixmap = pixmap;
@@ -3722,7 +3973,7 @@ void DocumentViewport::preloadPdfCache()
 
 void DocumentViewport::doAsyncPdfPreload()
 {
-    if (!m_document || !m_document->isPdfLoaded()) {
+    if (!m_document) {
         return;
     }
     
@@ -3743,34 +3994,44 @@ void DocumentViewport::doAsyncPdfPreload()
     int preloadEnd = qMin(m_document->pageCount() - 1, last + preloadBuffer);
     
     qreal dpi = effectivePdfDpi();
-    QString pdfPath = m_document->pdfPath();
     
-    if (pdfPath.isEmpty()) {
-        return;  // No PDF path available
-    }
-    
-    // Collect pages that need preloading
-    QList<int> pagesToPreload;
+    // Collect (sourceId, pdfPageNum) pairs that need preloading, resolving each page
+    // to its own PDF source so multi-source documents preload the correct backgrounds.
+    // renderPageNum is the index the provider actually uses: for a bundled source it
+    // is the compact mini-PDF index (via pageMap); otherwise it equals pdfPageNum.
+    struct PreloadItem { QString sourceId; int pdfPageNum; int renderPageNum; QString path; };
+    QList<PreloadItem> pagesToPreload;
     {
         QMutexLocker locker(&m_pdfCacheMutex);
         for (int i = preloadStart; i <= preloadEnd; ++i) {
             Page* page = m_document->page(i);
-            if (page && page->backgroundType == Page::BackgroundType::PDF) {
-                int pdfPageNum = page->pdfPageNumber;
-                
-                // Check if already cached
-                bool alreadyCached = false;
-                for (const PdfCacheEntry& entry : m_pdfCache) {
-                    if (entry.matches(pdfPageNum, dpi)) {
-                        alreadyCached = true;
-                        break;
-                    }
-                }
-                
-                if (!alreadyCached) {
-                    pagesToPreload.append(pdfPageNum);
+            if (!page || page->backgroundType != Page::BackgroundType::PDF) {
+                continue;
+            }
+            int pdfPageNum = page->pdfPageNumber;
+            const QString sourceId = page->pdfSourceId;
+            
+            // Check if already cached
+            bool alreadyCached = false;
+            for (const PdfCacheEntry& entry : m_pdfCache) {
+                if (entry.matches(sourceId, pdfPageNum, dpi)) {
+                    alreadyCached = true;
+                    break;
                 }
             }
+            if (alreadyCached) {
+                continue;
+            }
+            
+            QString path = m_document->pdfPathForSource(sourceId);
+            if (path.isEmpty()) {
+                continue;  // Source unavailable (will render placeholder synchronously)
+            }
+            const int renderPageNum = m_document->resolveSourcePageIndex(sourceId, pdfPageNum);
+            if (renderPageNum < 0) {
+                continue;  // Bundled source without this page mapped
+            }
+            pagesToPreload.append({ sourceId, pdfPageNum, renderPageNum, path });
         }
     }
     
@@ -3779,7 +4040,11 @@ void DocumentViewport::doAsyncPdfPreload()
     }
     
     // Launch async render for each page that needs caching
-    for (int pdfPageNum : pagesToPreload) {
+    for (const PreloadItem& item : pagesToPreload) {
+        const QString sourceId = item.sourceId;
+        const int pdfPageNum = item.pdfPageNum;
+        const int renderPageNum = item.renderPageNum;
+        const QString pdfPath = item.path;
         QFutureWatcher<QImage>* watcher = new QFutureWatcher<QImage>(this);
         
         // Track watcher for cleanup
@@ -3788,7 +4053,7 @@ void DocumentViewport::doAsyncPdfPreload()
         // THREAD SAFETY FIX: QPixmap must only be created on the main thread.
         // The background thread returns QImage, and we convert to QPixmap here
         // in the finished handler which runs on the main thread.
-        connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, pdfPageNum, dpi]() {
+        connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, sourceId, pdfPageNum, dpi]() {
             // BUG-A006 FIX: Check if watcher was cancelled (e.g., by invalidatePdfCache)
             // This happens when document/page changes while render is in progress
             m_activePdfWatchers.removeOne(watcher);
@@ -3810,7 +4075,7 @@ void DocumentViewport::doAsyncPdfPreload()
             }
             
             // Guard against document changing between render start and signal delivery
-            if (!m_document || !m_document->isPdfLoaded()) {
+            if (!m_document) {
                 return;
             }
 
@@ -3818,7 +4083,7 @@ void DocumentViewport::doAsyncPdfPreload()
             if (m_isDarkMode && m_pdfDarkModeEnabled) {
                 QVector<QRect> imgRegions;
                 if (!m_skipImageMasking) {
-                    imgRegions = m_document->pdfImageRegions(pdfPageNum, dpi);
+                    imgRegions = m_document->pdfImageRegions(sourceId, pdfPageNum, dpi);
                 }
                 DarkModeUtils::invertImageLightness(pdfImage, imgRegions);
             }
@@ -3831,12 +4096,13 @@ void DocumentViewport::doAsyncPdfPreload()
             
             // Check if already added (race condition prevention)
             for (const PdfCacheEntry& entry : m_pdfCache) {
-                if (entry.matches(pdfPageNum, dpi)) {
+                if (entry.matches(sourceId, pdfPageNum, dpi)) {
                     return;  // Already cached by another path
                 }
             }
             
             PdfCacheEntry entry;
+            entry.sourceId = sourceId;
             entry.pageIndex = pdfPageNum;
             entry.dpi = dpi;
             entry.pixmap = pixmap;
@@ -3865,16 +4131,17 @@ void DocumentViewport::doAsyncPdfPreload()
         // Background thread: render PDF to QImage (thread-safe)
         // NOTE: QImage is explicitly documented as thread-safe for read operations
         // and can be safely passed between threads.
-        QFuture<QImage> future = QtConcurrent::run([pdfPageNum, dpi, pdfPath]() -> QImage {
+        QFuture<QImage> future = QtConcurrent::run([renderPageNum, dpi, pdfPath]() -> QImage {
             // Use thread-local cached PDF provider to avoid re-opening the PDF
-            // for every page render. Each thread pool worker caches its own provider.
+            // for every page render. Each thread pool worker caches its own provider
+            // (keyed by resolved source path).
             ThreadPdfCache& cache = s_threadPdfCache.localData();
             PdfProvider* threadPdf = cache.getOrCreate(pdfPath);
             if (!threadPdf || !threadPdf->isValid()) {
                 return QImage();  // Return null image on failure
             }
             
-            QImage result = threadPdf->renderPageToImage(pdfPageNum, dpi);
+            QImage result = threadPdf->renderPageToImage(renderPageNum, dpi);
             threadPdf->trimStore();
             return result;
         });
@@ -3926,14 +4193,14 @@ void DocumentViewport::invalidatePdfCache()
     m_cachedDpi = 0;
 }
 
-void DocumentViewport::invalidatePdfCachePage(int pageIndex)
+void DocumentViewport::invalidatePdfCachePage(const QString& sourceId, int pageIndex)
 {
     // Thread-safe page removal
     QMutexLocker locker(&m_pdfCacheMutex);
     m_pdfCache.erase(
         std::remove_if(m_pdfCache.begin(), m_pdfCache.end(),
-                       [pageIndex](const PdfCacheEntry& entry) {
-                           return entry.pageIndex == pageIndex;
+                       [&sourceId, pageIndex](const PdfCacheEntry& entry) {
+                           return entry.pageIndex == pageIndex && entry.sourceId == sourceId;
                        }),
         m_pdfCache.end()
     );
@@ -10393,23 +10660,22 @@ void DocumentViewport::loadTextBoxesForPage(int pageIndex)
         return;
     }
     
-    // Get PDF provider
-    const PdfProvider* pdf = m_document->pdfProvider();
-    if (!pdf || !pdf->supportsTextExtraction()) {
+    // Resolve the page's own PDF source (empty id = primary), so text selection
+    // works for imported/non-primary PDF-backed pages, not just the primary PDF.
+    // Mirrors PdfSearchEngine::searchPage and the page-rendering path.
+    QString srcId;
+    int pdfPageIdx = -1;
+    if (!m_document->pdfBindingForNotebookPage(pageIndex, srcId, pdfPageIdx)) {
         return;
     }
-    
-    // Get PDF page index (may differ from document page index)
-    int pdfPageIndex = page->pdfPageNumber;
-    if (pdfPageIndex < 0) {
-        pdfPageIndex = pageIndex;  // Fallback: assume 1:1 mapping
+    const PdfProvider* pdf = m_document->providerForSource(srcId);
+    const int providerPage = m_document->resolveSourcePageIndex(srcId, pdfPageIdx);
+    if (!pdf || !pdf->supportsTextExtraction() || providerPage < 0) {
+        return;
     }
-    
-    // Load text boxes
-    m_textBoxCache = pdf->textBoxes(pdfPageIndex);
+
+    m_textBoxCache = pdf->textBoxes(providerPage);
     m_textBoxCachePageIndex = pageIndex;
-    
-    // Debug output removed - too verbose during normal use
 }
 
 void DocumentViewport::clearTextBoxCache()
@@ -10443,18 +10709,22 @@ void DocumentViewport::loadLinksForPage(int pageIndex)
         return;
     }
     
-    const PdfProvider* pdf = m_document->pdfProvider();
-    if (!pdf || !pdf->supportsLinks()) {
+    // Resolve the page's own PDF source (empty id = primary) so links resolve for
+    // imported/non-primary PDF-backed pages too. providerPage is in provider-document
+    // space (original page for external files, mini-PDF index for bundled sources).
+    QString srcId;
+    int pdfPageIdx = -1;
+    if (!m_document->pdfBindingForNotebookPage(pageIndex, srcId, pdfPageIdx)) {
         return;
     }
-    
-    int pdfPageIndex = page->pdfPageNumber;
-    if (pdfPageIndex < 0) pdfPageIndex = pageIndex;
-    
-    m_linkCache = pdf->links(pdfPageIndex);
+    const PdfProvider* pdf = m_document->providerForSource(srcId);
+    const int providerPage = m_document->resolveSourcePageIndex(srcId, pdfPageIdx);
+    if (!pdf || !pdf->supportsLinks() || providerPage < 0) {
+        return;
+    }
+
+    m_linkCache = pdf->links(providerPage);
     m_linkCachePageIndex = pageIndex;
-    
-    // Debug output removed - too verbose during normal scrolling
 }
 
 void DocumentViewport::clearLinkCache()
@@ -10487,14 +10757,25 @@ const PdfLink* DocumentViewport::findLinkAtPoint(const QPointF& pagePos, int pag
     return nullptr;
 }
 
-void DocumentViewport::activatePdfLink(const PdfLink& link)
+void DocumentViewport::activatePdfLink(const PdfLink& link, int fromPageIndex)
 {
     switch (link.type) {
         case PdfLinkType::Goto:
             {
-                // link.targetPage is a PDF page index, not notebook page index
-                // When pages are inserted between PDF pages, these differ
-                int notebookPageIndex = m_document->notebookPageIndexForPdfPage(link.targetPage);
+                // Resolve the destination within the SAME source as the clicked page.
+                // link.targetPage is in provider-document space; convert it back to an
+                // original page number, then find the notebook page showing that
+                // (source, original page). Unresolved -> no-op (e.g. the destination
+                // page was not imported into this document).
+                QString srcId;
+                int fromPdfPage = -1;
+                int notebookPageIndex = -1;
+                if (m_document->pdfBindingForNotebookPage(fromPageIndex, srcId, fromPdfPage)) {
+                    const int origTarget = m_document->originalPageForProviderIndex(srcId, link.targetPage);
+                    if (origTarget >= 0) {
+                        notebookPageIndex = m_document->notebookPageIndexForSourcePage(srcId, origTarget);
+                    }
+                }
                 if (notebookPageIndex >= 0) {
                     #ifdef SPEEDYNOTE_DEBUG
                     qDebug() << "PDF link: navigating to PDF page" << link.targetPage 
@@ -10948,7 +11229,7 @@ void DocumentViewport::handlePointerPress_Highlighter(const PointerEvent& pe)
     if (!ocrMode) {
         const PdfLink* link = findLinkAtPoint(hit.pagePoint, hit.pageIndex);
         if (link && link->type != PdfLinkType::None) {
-            activatePdfLink(*link);
+            activatePdfLink(*link, hit.pageIndex);
             m_pointerActive = false;
             updateHighlighterCursor();
             return;
@@ -12638,6 +12919,101 @@ void DocumentViewport::clearUndoStacksFrom(int pageIndex)
     m_ocrDirtyPages.erase(m_ocrDirtyPages.lower_bound(pageIndex), m_ocrDirtyPages.end());
 }
 
+bool DocumentViewport::deletePagesWithUndo(const QList<int>& indices)
+{
+    if (!m_document || indices.isEmpty()) {
+        return false;
+    }
+
+    // Collect valid, unique indices.
+    QList<int> targets;
+    for (int i : indices) {
+        if (i >= 0 && i < m_document->pageCount() && !targets.contains(i)) {
+            targets.append(i);
+        }
+    }
+    if (targets.isEmpty()) {
+        return false;
+    }
+
+    // Respect the document's minimum-page guard: never delete every page.
+    if (targets.size() >= m_document->pageCount()) {
+        return false;
+    }
+
+    // Clear any object selection first: removePage() frees the page's objects,
+    // and m_selectedObjects holds raw pointers into them that would otherwise
+    // dangle (crash on the next paint / selection query).
+    if (hasSelectedObjects()) {
+        deselectAllObjects();
+    }
+
+    // Remove in descending index order so earlier removals don't shift the
+    // indices of pages we have yet to remove.
+    std::sort(targets.begin(), targets.end(), [](int a, int b) { return a > b; });
+    const int minIndex = targets.last();  // smallest index (sorted descending)
+
+    UndoAction action;
+    action.type = UndoAction::PageDelete;
+
+    for (int idx : targets) {
+        Page* page = m_document->page(idx);  // ensures the page is loaded
+        if (!page) {
+            continue;
+        }
+        UndoAction::DeletedPageSnapshot snap;
+        snap.index = idx;
+        snap.pageJson = page->toJson();
+        if (m_document->removePage(idx)) {
+            action.deletedPages.append(snap);
+        }
+    }
+
+    if (action.deletedPages.isEmpty()) {
+        return false;
+    }
+
+    action.focusPageIndex = qBound(0, minIndex, m_document->pageCount() - 1);
+
+    // Drop now-stale stroke/object undo history for shifted pages, then push the
+    // grouped PageDelete on top so one Ctrl+Z restores the whole set. Pushing
+    // AFTER the purge prevents the action from clearing itself.
+    clearUndoStacksFrom(minIndex);
+    pushUndoAction(action);
+
+    return true;
+}
+
+bool DocumentViewport::importPagesWithUndo(Document* srcDoc, const QStringList& srcPageUuids, int destIndex)
+{
+    if (!m_document || !srcDoc || srcPageUuids.isEmpty()) {
+        return false;
+    }
+
+    PageImportResult result = m_document->importPagesFrom(srcDoc, srcPageUuids, destIndex);
+    if (result.insertedPageJson.isEmpty()) {
+        return false;
+    }
+
+    UndoAction action;
+    action.type = UndoAction::PageInsert;
+    for (int k = 0; k < result.insertedPageJson.size(); ++k) {
+        UndoAction::DeletedPageSnapshot snap;
+        snap.index = result.destStartIndex + k;
+        snap.pageJson = result.insertedPageJson[k];
+        action.deletedPages.append(snap);
+    }
+
+    const int focusIndex = result.destStartIndex >= 0 ? result.destStartIndex : destIndex;
+    action.focusPageIndex = qBound(0, focusIndex, m_document->pageCount() - 1);
+
+    clearUndoStacksFrom(focusIndex);
+    pushUndoAction(action);
+
+    emit pageStructureChangedByUndo(action.focusPageIndex);
+    return true;
+}
+
 // ============================================================================
 // Layer Management (Phase 5)
 // ============================================================================
@@ -12771,6 +13147,42 @@ void DocumentViewport::undo()
     if (m_undoStack.isEmpty() || !m_document) return;
 
     UndoAction action = m_undoStack.pop();
+
+    if (action.type == UndoAction::PageDelete) {
+        // Restore removed pages in ascending index order (Plan A2).
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index < b.index; });
+        for (const auto& snap : snaps) {
+            m_document->restorePageFromSnapshot(snap.index, snap.pageJson);
+        }
+        m_redoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        int focus = snaps.isEmpty() ? action.focusPageIndex : snaps.first().index;
+        emit pageStructureChangedByUndo(qBound(0, focus, m_document->pageCount() - 1));
+        return;
+    }
+
+    if (action.type == UndoAction::PageInsert) {
+        // Remove imported pages in descending index order (Plan B).
+        if (hasSelectedObjects()) {
+            deselectAllObjects();
+        }
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index > b.index; });
+        for (const auto& snap : snaps) {
+            m_document->removePage(snap.index);
+        }
+        m_redoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        emit pageStructureChangedByUndo(qBound(0, action.focusPageIndex, m_document->pageCount() - 1));
+        return;
+    }
 
     bool isObjectAction = (action.type == UndoAction::ObjectInsert ||
                            action.type == UndoAction::ObjectDelete ||
@@ -13059,6 +13471,39 @@ void DocumentViewport::redo()
     if (m_redoStack.isEmpty() || !m_document) return;
 
     UndoAction action = m_redoStack.pop();
+
+    if (action.type == UndoAction::PageDelete) {
+        // Re-remove pages in descending index order (Plan A2).
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index > b.index; });
+        for (const auto& snap : snaps) {
+            m_document->removePage(snap.index);
+        }
+        m_undoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        emit pageStructureChangedByUndo(qBound(0, action.focusPageIndex, m_document->pageCount() - 1));
+        return;
+    }
+
+    if (action.type == UndoAction::PageInsert) {
+        // Re-insert imported pages in ascending index order (Plan B).
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index < b.index; });
+        for (const auto& snap : snaps) {
+            m_document->restorePageFromSnapshot(snap.index, snap.pageJson);
+        }
+        m_undoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        int focus = snaps.isEmpty() ? action.focusPageIndex : snaps.first().index;
+        emit pageStructureChangedByUndo(qBound(0, focus, m_document->pageCount() - 1));
+        return;
+    }
 
     bool isObjectAction = (action.type == UndoAction::ObjectInsert ||
                            action.type == UndoAction::ObjectDelete ||
@@ -13697,14 +14142,22 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             break;
             
         case Page::BackgroundType::PDF:
-            // Render PDF page from cache (Task 1.3.6)
-            if (m_document->isPdfLoaded() && page->pdfPageNumber >= 0) {
-                qreal dpi = effectivePdfDpi();
-                QPixmap pdfPixmap = getCachedPdfPage(page->pdfPageNumber, dpi);
-                
-                if (!pdfPixmap.isNull()) {
-                    // Scale pixmap to fit page rect
-                    painter.drawPixmap(pageRect.toRect(), pdfPixmap);
+            // Render PDF page from cache (Task 1.3.6), resolving the page's own source.
+            if (page->pdfPageNumber >= 0) {
+                PdfProvider* prov = m_document->providerForSource(page->pdfSourceId);
+                // Skip pages whose original number can't be served by the resolved
+                // provider (e.g. a bundled source without the original PDF where the
+                // page isn't in the mini-PDF's page map). Rendering would return null
+                // and, since nulls aren't cached, retry on every repaint. Draw blank.
+                const int resolvedPage = m_document->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
+                if (prov && prov->isValid() && resolvedPage >= 0 && resolvedPage < prov->pageCount()) {
+                    qreal dpi = effectivePdfDpi();
+                    QPixmap pdfPixmap = getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
+                    
+                    if (!pdfPixmap.isNull()) {
+                        // Scale pixmap to fit page rect
+                        painter.drawPixmap(pageRect.toRect(), pdfPixmap);
+                    }
                 }
             }
             break;

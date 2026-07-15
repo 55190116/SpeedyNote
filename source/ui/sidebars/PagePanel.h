@@ -4,10 +4,14 @@
 #include <QWidget>
 #include <QHash>
 #include <QSet>
+#include <QList>
 #include <QPixmap>
 
 class PagePanelListView;
 class QTimer;
+class QLabel;
+class QPushButton;
+class QItemSelection;
 class Document;
 class PageThumbnailModel;
 class PageThumbnailDelegate;
@@ -116,6 +120,31 @@ public:
      */
     void setDarkMode(bool dark);
 
+    // =========================================================================
+    // Multi-Select Mode (Plan C)
+    // =========================================================================
+
+    /**
+     * @brief Enable or disable multi-page selection mode.
+     * @param enabled True to enter select mode.
+     *
+     * In select mode the list uses ExtendedSelection, reorder drag is disabled,
+     * and the in-panel selection header is shown. Toggling always clears the
+     * current selection.
+     */
+    void setSelectMode(bool enabled);
+
+    /**
+     * @brief Whether multi-page selection mode is active.
+     */
+    bool isSelectMode() const { return m_selectMode; }
+
+    /**
+     * @brief Clear the current selection (e.g. after a delete that invalidated
+     *        the selected indices) and refresh the header.
+     */
+    void clearSelectionAfterDelete();
+
     /**
      * @brief Set whether PDF thumbnails should be dark-mode inverted.
      * @param enabled True to invert PDF backgrounds in thumbnails.
@@ -170,6 +199,31 @@ signals:
      */
     void pageDropped(int fromIndex, int toIndex);
 
+    /**
+     * @brief Emitted when select mode is entered or exited.
+     * @param enabled True if select mode is now active.
+     */
+    void selectModeChanged(bool enabled);
+
+    /**
+     * @brief Emitted when the number of selected pages changes.
+     * @param count Current selection count.
+     */
+    void selectionCountChanged(int count);
+
+    /**
+     * @brief Emitted when the user requests deletion of the selected pages.
+     * @param indices 0-based page indices to delete.
+     */
+    void deleteSelectedRequested(const QList<int>& indices);
+
+    /**
+     * @brief Emitted when the user requests copying the selected pages to
+     *        another open document (Plan D1).
+     * @param indices 0-based page indices to copy.
+     */
+    void copySelectedRequested(const QList<int>& indices);
+
 public slots:
     /**
      * @brief Handle current page change from viewport.
@@ -196,11 +250,20 @@ private slots:
     void onModelPageDropped(int fromIndex, int toIndex);
     void performPendingInvalidation();
     void onDragRequested(const QModelIndex& index);
+    void onSelectionChanged();
+    void startSelectionDrag();
 
 private:
     void setupUI();
     void setupConnections();
     void configureListView();
+
+    // Selection (Plan C) helpers
+    QList<int> selectedRows() const;
+    void updateSelectionHeader();
+    void openRangeDialog();
+    // Plan D2: build a drag pixmap (first thumbnail + count badge).
+    QPixmap makeSelectionDragPixmap(const QList<int>& rows) const;
     void updateThumbnailWidth();
     void applyTheme();
 
@@ -219,10 +282,19 @@ private:
     PageThumbnailModel* m_model = nullptr;
     PageThumbnailDelegate* m_delegate = nullptr;
 
+    // Selection header (Plan C) - shown only in select mode
+    QWidget* m_selectionHeader = nullptr;
+    QLabel* m_selectionCountLabel = nullptr;
+    QPushButton* m_rangeButton = nullptr;
+    QPushButton* m_clearButton = nullptr;
+    QPushButton* m_copyButton = nullptr;
+    QPushButton* m_deleteButton = nullptr;
+
     // State
     Document* m_document = nullptr;
     int m_currentPageIndex = 0;
     bool m_darkMode = false;
+    bool m_selectMode = false;
     
     // Current layout column count (1 or 2). Hysteresis is applied so we don't
     // flip back and forth while the user drags the splitter handle.

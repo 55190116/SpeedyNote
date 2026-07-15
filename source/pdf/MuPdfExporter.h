@@ -199,6 +199,15 @@ signals:
     void exportFailed(const QString& errorMessage);
 
 private:
+    // Owning MuPDF handles for one PDF source (a document may draw pages from
+    // several sources). m_pdf aliases the same underlying document as m_doc and
+    // must NOT be dropped separately.
+    struct SourceHandles {
+        fz_document* doc = nullptr;
+        pdf_document* pdf = nullptr;
+        struct pdf_graft_map* graft = nullptr;  // one graft map per source
+    };
+
     // ===== Initialization =====
     
     /**
@@ -213,10 +222,31 @@ private:
     void cleanup();
     
     /**
-     * @brief Open source PDF for page grafting.
-     * @return true if source PDF opened (or no source PDF needed)
+     * @brief Open the PRIMARY source PDF, cache its handles, and make it active.
+     * @return true if opened (or no source PDF needed); false on a fatal primary error.
+     *
+     * Non-primary sources are opened lazily and gracefully via sourceHandlesFor().
      */
     bool openSourcePdf();
+
+    /**
+     * @brief Resolve (opening + caching on first use) the MuPDF handles for a source.
+     * @param sourceId Source id ("" = primary source).
+     * @return Cached handles (never null once ctx/output exist); handles may hold
+     *         null doc/pdf/graft when the source file is missing/invalid, in which
+     *         case callers fall back to blank-page rendering.
+     *
+     * A missing or unopenable non-primary source degrades gracefully (blank pages)
+     * rather than aborting the whole export.
+     */
+    SourceHandles* sourceHandlesFor(const QString& sourceId);
+
+    /**
+     * @brief Point the active-source aliases (m_sourceDoc/m_sourcePdf/m_graftMap) at
+     *        the given source, opening it on first use.
+     * @param sourceId Source id ("" = primary source).
+     */
+    void activateSource(const QString& sourceId);
     
     // ===== Page Processing =====
     
@@ -296,8 +326,8 @@ private:
      * @return true if successful
      */
     bool writeOutline(const QVector<int>& exportedPages);
-    // Note: writeOutlineRecursive is a static helper in MuPdfExporter.cpp
-    // (uses fz_outline which cannot be forward-declared)
+    // Note: buildAggregatedOutline is a static helper in MuPdfExporter.cpp; it
+    // renders Document::aggregatedOutline() into the output PDF's bookmark tree.
     
     // ===== Finalization =====
     
@@ -315,13 +345,16 @@ private:
     // MuPDF contexts (mutable because MuPDF modifies internal state on "read" ops)
     mutable fz_context* m_ctx = nullptr;
     pdf_document* m_outputDoc = nullptr;
+
+    // Per-source MuPDF handles, owned here. Key = Page::pdfSourceId ("" = primary).
+    // Opened lazily via sourceHandlesFor() and all dropped in cleanup().
+    std::map<QString, SourceHandles> m_sources;
+    QString m_currentSourceId;  // id of the source the m_source* aliases point at
+
+    // Active-source aliases (NON-owning; point into the m_sources entry selected by
+    // activateSource()). The per-page graft/render code uses these directly.
     fz_document* m_sourceDoc = nullptr;
     pdf_document* m_sourcePdf = nullptr;
-    
-    // Graft map for efficient multi-page grafting
-    // When grafting multiple pages, shared resources (fonts, images) are only
-    // copied once when using a graft map. This is created in openSourcePdf()
-    // and dropped in cleanup().
     struct pdf_graft_map* m_graftMap = nullptr;
     
     // Export state

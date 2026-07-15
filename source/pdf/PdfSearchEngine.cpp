@@ -144,11 +144,19 @@ QVector<PdfSearchMatch> PdfSearchEngine::searchPage(int pageIndex,
     }
     
     // --- PDF text search (existing logic) ---
-    // pageIndex is a notebook page index; convert to PDF page index for textBoxes()
-    const PdfProvider* pdf = m_document->pdfProvider();
-    if (pdf && pdf->supportsTextExtraction()) {
-        int pdfPageIdx = m_document->pdfPageIndexForNotebookPage(pageIndex);
-        QVector<PdfTextBox> textBoxes = (pdfPageIdx >= 0) ? pdf->textBoxes(pdfPageIdx) : QVector<PdfTextBox>();
+    // pageIndex is a notebook page index; resolve it to its own PDF source + page
+    // number so that pages backed by ANY source (not just primary) are searchable.
+    QString srcId;
+    int pdfPageIdx = -1;
+    if (m_document->pdfBindingForNotebookPage(pageIndex, srcId, pdfPageIdx)) {
+        // Provider is pre-opened on the main thread (ensureAllPdfProvidersLoaded);
+        // here we only read the cached provider from the worker thread.
+        const PdfProvider* pdf = m_document->providerForSource(srcId);
+        // Translate the original page number to the provider's index (bundled sources
+        // remap into a compact mini-PDF via pageMap).
+        const int providerPage = m_document->resolveSourcePageIndex(srcId, pdfPageIdx);
+        QVector<PdfTextBox> textBoxes = (pdf && pdf->supportsTextExtraction() && providerPage >= 0)
+            ? pdf->textBoxes(providerPage) : QVector<PdfTextBox>();
         if (!textBoxes.isEmpty()) {
             QString pageText;
             QVector<QPair<int, int>> boxMapping;
@@ -752,7 +760,10 @@ void PdfSearchEngine::startPrecaching(int centerPage, int direction)
     if (totalPages == 0 || cacheSize() >= totalPages) {
         return;  // Already fully cached or empty document
     }
-    
+
+    // Ensure all providers are open on the main thread before the worker reads them.
+    m_document->ensureAllPdfProvidersLoaded();
+
     m_precaching.store(true);
     
     QFuture<void> future = QtConcurrent::run([this, centerPage, direction]() {
@@ -1016,7 +1027,12 @@ void PdfSearchEngine::findNext(const QString& text, bool caseSensitive, bool who
         emit notFound(false);
         return;
     }
-    
+
+    // Pre-open every source's provider on the main thread so the background search
+    // (and pre-cache) worker only reads the provider cache; providerForSource()
+    // lazily mutates it, which must not race across threads.
+    m_document->ensureAllPdfProvidersLoaded();
+
     // Reset result state
     {
         QMutexLocker lock(&m_resultMutex);
@@ -1063,7 +1079,10 @@ void PdfSearchEngine::findPrev(const QString& text, bool caseSensitive, bool who
         emit notFound(false);
         return;
     }
-    
+
+    // Pre-open every source's provider on the main thread (see findNext()).
+    m_document->ensureAllPdfProvidersLoaded();
+
     // Reset result state
     {
         QMutexLocker lock(&m_resultMutex);

@@ -25,7 +25,9 @@
 
 #include <algorithm> // for std::sort
 #include <cmath>     // for cosf, sinf, M_PI
+#include <functional> // OUT2: std::function for the outline export-index resolver
 #include <map>       // for ExtGState alpha cache
+#include <unordered_map> // OUT2: notebook-page -> export-index lookup
 #include <vector>    // for content stream tokenizer
 
 // Forward declarations for static helper functions defined later in this file
@@ -36,9 +38,13 @@ static void appendLayerStrokesToBuffer(fz_context* ctx, pdf_document* outputDoc,
                                        bool darkenStrokes = false);
 static int getSourcePageRotation(fz_context* ctx, pdf_document* srcPdf, int pageIndex);
 static fz_rect getSourcePageBBox(fz_context* ctx, pdf_document* srcPdf, int pageIndex);
-static pdf_obj* writeOutlineRecursive(fz_context* ctx, pdf_document* outputDoc,
-                                      fz_outline* srcOutline, 
-                                      const std::map<int, int>& pdfToExportIndex);
+// OUT2: build the exported bookmark tree from Document::aggregatedOutline() so the
+// export matches the on-screen panel exactly (multi-source grouped roots,
+// span-coverage pruning, floor-redirected destinations). exportIndexOf() maps an
+// item to its 0-based output page, or -1 for a destination-less header/inert entry.
+static pdf_obj* buildAggregatedOutline(fz_context* ctx, pdf_document* outputDoc,
+                                       const QVector<PdfOutlineItem>& items,
+                                       const std::function<int(const PdfOutlineItem&)>& exportIndexOf);
 static bool addImageToPage(fz_context* ctx, pdf_document* outputDoc,
                            const ImageObject* img, fz_buffer* contentBuf,
                            pdf_obj* resources, int imageIndex, float pageHeightPt,
@@ -771,26 +777,36 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
         if (!currentPage) {
             qWarning() << "[MuPdfExporter] Failed to get page" << pageIndex;
             pageSuccess = false;
-        } else if (isPageModified(pageIndex)) {
-            // Page has annotations - need to render
-            if (currentPage->pdfPageNumber >= 0 && m_sourcePdf) {
-                // Modified page with PDF background
-                pageSuccess = renderModifiedPage(pageIndex);
+        } else {
+            // Point the active-source aliases at THIS page's own PDF source so that
+            // graft/render/import operate on the correct source (multi-source docs).
+            QString srcId;
+            int pdfPage = -1;
+            if (m_document->pdfBindingForNotebookPage(pageIndex, srcId, pdfPage)) {
+                activateSource(srcId);
+            }
+
+            if (isPageModified(pageIndex)) {
+                // Page has annotations - need to render
+                if (currentPage->pdfPageNumber >= 0 && m_sourcePdf) {
+                    // Modified page with PDF background
+                    pageSuccess = renderModifiedPage(pageIndex);
+                } else {
+                    // No PDF background (blank notebook page)
+                    pageSuccess = renderBlankPage(pageIndex);
+                }
+            } else if (m_sourcePdf && currentPage->pdfPageNumber >= 0) {
+                // Unmodified page with PDF
+                if (m_options.darkModeBackground) {
+                    // Dark mode export requires color rewriting, can't byte-copy
+                    pageSuccess = renderModifiedPage(pageIndex);
+                } else {
+                    pageSuccess = graftPage(pageIndex);
+                }
             } else {
-                // No PDF background (blank notebook page)
+                // Unmodified blank page - still need to render
                 pageSuccess = renderBlankPage(pageIndex);
             }
-        } else if (m_sourcePdf && currentPage->pdfPageNumber >= 0) {
-            // Unmodified page with PDF
-            if (m_options.darkModeBackground) {
-                // Dark mode export requires color rewriting, can't byte-copy
-                pageSuccess = renderModifiedPage(pageIndex);
-            } else {
-                pageSuccess = graftPage(pageIndex);
-            }
-        } else {
-            // Unmodified blank page - still need to render
-            pageSuccess = renderBlankPage(pageIndex);
         }
         
         if (!pageSuccess) {
@@ -804,6 +820,10 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
         result.pagesExported++;
     }
     
+    // Metadata and outline are taken from the PRIMARY source; re-activate it since
+    // the page loop may have left another source active.
+    activateSource(QString());
+
     // Write metadata
     if (options.preserveMetadata && !writeMetadata()) {
         qWarning() << "[MuPdfExporter] Failed to write metadata (non-fatal)";
@@ -997,22 +1017,28 @@ bool MuPdfExporter::initContext()
 
 void MuPdfExporter::cleanup()
 {
-    // Drop graft map first (it references both documents)
-    if (m_graftMap) {
-        pdf_drop_graft_map(m_ctx, m_graftMap);
-        m_graftMap = nullptr;
+    // Drop every cached source's handles. Graft maps reference both documents, so
+    // drop them before the source documents. m_sourcePdf aliases m_sourceDoc, so the
+    // source is dropped once via its fz_document handle.
+    for (auto& entry : m_sources) {
+        SourceHandles& sh = entry.second;
+        if (sh.graft) {
+            pdf_drop_graft_map(m_ctx, sh.graft);
+            sh.graft = nullptr;
+        }
+        if (sh.doc) {
+            fz_drop_document(m_ctx, sh.doc);
+            sh.doc = nullptr;
+            sh.pdf = nullptr;
+        }
     }
-    
-    if (m_sourcePdf) {
-        // Note: m_sourcePdf and m_sourceDoc point to the same document
-        // Only drop once via the fz_document handle
-    }
-    
-    if (m_sourceDoc) {
-        fz_drop_document(m_ctx, m_sourceDoc);
-        m_sourceDoc = nullptr;
-        m_sourcePdf = nullptr;
-    }
+    m_sources.clear();
+    m_currentSourceId.clear();
+
+    // Active-source aliases are non-owning; just clear them.
+    m_sourceDoc = nullptr;
+    m_sourcePdf = nullptr;
+    m_graftMap = nullptr;
     
     if (m_outputDoc) {
         pdf_drop_document(m_ctx, m_outputDoc);
@@ -1029,11 +1055,13 @@ bool MuPdfExporter::openSourcePdf()
 {
     if (!m_document) return true;
     
-    QString pdfPath = m_document->pdfPath();
+    QString pdfPath = m_document->pdfPath();  // primary source path
     if (pdfPath.isEmpty()) {
-        // No source PDF - this is fine for blank notebooks
+        // No primary source - this is fine for blank notebooks. Cache an empty entry
+        // so activateSource("") is a cheap no-op.
+        m_sources[QString()] = SourceHandles{};
         #ifdef SPEEDYNOTE_DEBUG
-        qDebug() << "[MuPdfExporter] No source PDF (blank document)";
+        qDebug() << "[MuPdfExporter] No primary source PDF (blank document)";
         #endif
         return true;
     }
@@ -1045,44 +1073,113 @@ bool MuPdfExporter::openSourcePdf()
     }
     
     QByteArray pathUtf8 = pdfPath.toUtf8();
+    SourceHandles sh;
     
     fz_try(m_ctx) {
-        m_sourceDoc = fz_open_document(m_ctx, pathUtf8.constData());
+        sh.doc = fz_open_document(m_ctx, pathUtf8.constData());
         
         // Check for password-protected PDF
-        if (fz_needs_password(m_ctx, m_sourceDoc)) {
+        if (fz_needs_password(m_ctx, sh.doc)) {
             qWarning() << "[MuPdfExporter] Source PDF is password-protected";
-            fz_drop_document(m_ctx, m_sourceDoc);
-            m_sourceDoc = nullptr;
+            fz_drop_document(m_ctx, sh.doc);
+            sh.doc = nullptr;
             m_lastError = tr("Cannot export password-protected PDF.\nPlease remove the password and try again.");
             return false;
         }
         
         // Verify it's a PDF (for grafting capabilities)
-        m_sourcePdf = pdf_document_from_fz_document(m_ctx, m_sourceDoc);
-        if (!m_sourcePdf) {
+        sh.pdf = pdf_document_from_fz_document(m_ctx, sh.doc);
+        if (!sh.pdf) {
             qWarning() << "[MuPdfExporter] Source is not a PDF document";
-            fz_drop_document(m_ctx, m_sourceDoc);
-            m_sourceDoc = nullptr;
+            fz_drop_document(m_ctx, sh.doc);
+            sh.doc = nullptr;
             m_lastError = tr("Source file is not a valid PDF document.");
             return false;
         }
         
         // Create graft map for efficient multi-page grafting
         // This ensures shared resources (fonts, images) are only copied once
-        m_graftMap = pdf_new_graft_map(m_ctx, m_outputDoc);
+        sh.graft = pdf_new_graft_map(m_ctx, m_outputDoc);
     }
     fz_catch(m_ctx) {
+        // sh was not stored yet; drop whatever opened to avoid a leak.
+        if (sh.doc) { fz_drop_document(m_ctx, sh.doc); sh.doc = nullptr; sh.pdf = nullptr; }
         qWarning() << "[MuPdfExporter] Failed to open source PDF:" << fz_caught_message(m_ctx);
         m_lastError = tr("Failed to open source PDF: %1").arg(QString::fromUtf8(fz_caught_message(m_ctx)));
         return false;
     }
     
+    m_sources[QString()] = sh;
+    activateSource(QString());  // make primary the active source
+    
     #ifdef SPEEDYNOTE_DEBUG
-    qDebug() << "[MuPdfExporter] Opened source PDF:" << pdfPath
-             << "with" << fz_count_pages(m_ctx, m_sourceDoc) << "pages";
+    qDebug() << "[MuPdfExporter] Opened primary source PDF:" << pdfPath
+             << "with" << fz_count_pages(m_ctx, sh.doc) << "pages";
     #endif
     return true;
+}
+
+MuPdfExporter::SourceHandles* MuPdfExporter::sourceHandlesFor(const QString& sourceId)
+{
+    auto it = m_sources.find(sourceId);
+    if (it != m_sources.end()) {
+        return &it->second;
+    }
+    
+    // Open (and cache) on first use. Failures cache a null-handle entry so we don't
+    // retry every page and so callers fall back to blank rendering.
+    SourceHandles sh;
+    if (m_ctx && m_outputDoc && m_document) {
+        QString path = m_document->pdfPathForSource(sourceId);
+        if (!path.isEmpty() && QFile::exists(path)) {
+            QByteArray pathUtf8 = path.toUtf8();
+            fz_document* doc = nullptr;
+            fz_var(doc);
+            fz_try(m_ctx) {
+                doc = fz_open_document(m_ctx, pathUtf8.constData());
+                if (!fz_needs_password(m_ctx, doc)) {
+                    pdf_document* pdf = pdf_document_from_fz_document(m_ctx, doc);
+                    if (pdf) {
+                        // Only commit to sh after the graft map is created, so a throw
+                        // here leaves ownership with the local `doc` (dropped below).
+                        pdf_graft_map* graft = pdf_new_graft_map(m_ctx, m_outputDoc);
+                        sh.doc = doc;
+                        sh.pdf = pdf;
+                        sh.graft = graft;
+                        doc = nullptr;  // ownership transferred to sh
+                    }
+                }
+            }
+            fz_catch(m_ctx) {
+                qWarning() << "[MuPdfExporter] Failed to open source" << sourceId
+                           << ":" << fz_caught_message(m_ctx);
+            }
+            if (doc) {
+                // Not adopted (password, not-a-PDF, or graft failure) - drop it.
+                fz_drop_document(m_ctx, doc);
+            }
+        } else if (!path.isEmpty()) {
+            qWarning() << "[MuPdfExporter] Source file missing for" << sourceId << ":" << path;
+        }
+    }
+    
+    auto res = m_sources.emplace(sourceId, sh);
+    return &res.first->second;
+}
+
+void MuPdfExporter::activateSource(const QString& sourceId)
+{
+    m_currentSourceId = sourceId;
+    SourceHandles* sh = sourceHandlesFor(sourceId);
+    if (sh) {
+        m_sourceDoc = sh->doc;
+        m_sourcePdf = sh->pdf;
+        m_graftMap = sh->graft;
+    } else {
+        m_sourceDoc = nullptr;
+        m_sourcePdf = nullptr;
+        m_graftMap = nullptr;
+    }
 }
 
 // ============================================================================
@@ -1124,9 +1221,11 @@ bool MuPdfExporter::graftPage(int pageIndex)
     Page* page = m_document->page(pageIndex);
     if (!page) return false;
     
-    int pdfPageNum = page->pdfPageNumber;
+    // Translate the original page number to the active source's provider index
+    // (bundled mini-PDFs remap referenced pages via pageMap).
+    int pdfPageNum = m_document->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
     if (pdfPageNum < 0) {
-        qWarning() << "[MuPdfExporter] Page" << pageIndex << "has no PDF page number";
+        qWarning() << "[MuPdfExporter] Page" << pageIndex << "has no resolvable PDF page number";
         return false;
     }
     
@@ -1170,9 +1269,13 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
     Page* page = m_document->page(pageIndex);
     if (!page) return false;
     
-    // Get the source PDF page number for this SpeedyNote page
-    int pdfPageNum = page->pdfPageNumber;
-    if (pdfPageNum < 0 || !m_sourcePdf) {
+    // origPageNum: the ORIGINAL page number stored on the page (used for Document
+    // source-aware helpers, which translate to the provider index internally).
+    // pdfPageNum: the provider-facing index for direct MuPDF ops against m_sourcePdf
+    // (bundled mini-PDFs remap referenced pages via pageMap).
+    int origPageNum = page->pdfPageNumber;
+    int pdfPageNum = m_document->resolveSourcePageIndex(page->pdfSourceId, origPageNum);
+    if (origPageNum < 0 || pdfPageNum < 0 || !m_sourcePdf) {
         // No PDF background - use blank page rendering
         return renderBlankPage(pageIndex);
     }
@@ -1224,11 +1327,11 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
         
         // Dark mode background: rasterize PDF page, invert, embed as image
         if (bgIsRasterDarkMode && m_sourceDoc) {
-            QImage bgImage = m_document->renderPdfPageToImage(pdfPageNum, static_cast<qreal>(m_options.dpi));
+            QImage bgImage = m_document->renderPdfPageToImage(m_currentSourceId, origPageNum, static_cast<qreal>(m_options.dpi));
             if (!bgImage.isNull()) {
                 QVector<QRect> imgRegions;
                 if (!m_options.skipImageMasking) {
-                    imgRegions = m_document->pdfImageRegions(pdfPageNum, static_cast<qreal>(m_options.dpi));
+                    imgRegions = m_document->pdfImageRegions(m_currentSourceId, origPageNum, static_cast<qreal>(m_options.dpi));
                 }
                 DarkModeUtils::invertImageLightness(bgImage, imgRegions);
 
@@ -2658,228 +2761,162 @@ bool MuPdfExporter::writeMetadata()
 
 bool MuPdfExporter::writeOutline(const QVector<int>& exportedPages)
 {
-    // No source PDF means no outline to copy
-    if (!m_sourcePdf || !m_outputDoc || !m_ctx || !m_document) {
+    // OUT2: write bookmarks straight from Document::aggregatedOutline() - the exact
+    // tree the on-screen outline panel shows. That tree already merges every
+    // contributing PDF source (primary + imported), groups multiple sources under
+    // titled roots, prunes with TOC coverage-span semantics, and floor-redirects
+    // each surviving entry to a page that is actually present in the document.
+    //
+    // The previous per-source approach re-loaded raw fz_outlines and trimmed by an
+    // EXACT page hit, so an imported page subset (whose bookmark targets rarely land
+    // exactly on an imported page) lost all of its bookmarks. Consuming the
+    // aggregated tree keeps export and panel identical and fixes that.
+    if (!m_outputDoc || !m_ctx || !m_document) {
         return true;  // Not an error, just nothing to do
     }
-    
-    // Load outline from source PDF
-    fz_outline* srcOutline = nullptr;
-    fz_try(m_ctx) {
-        srcOutline = fz_load_outline(m_ctx, m_sourceDoc);
-    }
-    fz_catch(m_ctx) {
+
+    const QVector<PdfOutlineItem> outline = m_document->aggregatedOutline();
+    if (outline.isEmpty()) {
         #ifdef SPEEDYNOTE_DEBUG
-        qDebug() << "[MuPdfExporter] No outline in source PDF";
-        #endif
-        return true;  // No outline is fine
-    }
-    
-    if (!srcOutline) {
-        return true;  // No outline to copy
-    }
-    
-    // Build mapping: PDF page index → export page index
-    // 
-    // Document pages can be:
-    // - PDF-backed: page->pdfPageNumber >= 0
-    // - Inserted: page->pdfPageNumber < 0 (blank, grid, custom, etc.)
-    //
-    // exportedPages[i] = document page index
-    // We need: pdfPageIndex → i (the export index)
-    
-    std::map<int, int> pdfToExportIndex;
-    
-    for (int exportIdx = 0; exportIdx < exportedPages.size(); ++exportIdx) {
-        int docPageIdx = exportedPages[exportIdx];
-        const Page* page = m_document->page(docPageIdx);
-        if (page && page->pdfPageNumber >= 0) {
-            // This document page is backed by a PDF page
-            pdfToExportIndex[page->pdfPageNumber] = exportIdx;
-        }
-    }
-    
-    if (pdfToExportIndex.empty()) {
-        // No PDF pages in export, outline would be useless
-        fz_drop_outline(m_ctx, srcOutline);
-        #ifdef SPEEDYNOTE_DEBUG
-        qDebug() << "[MuPdfExporter] No PDF pages in export, skipping outline";
+        qDebug() << "[MuPdfExporter] No aggregated outline, skipping";
         #endif
         return true;
     }
-    
-    // Recursively build and write the outline
+
+    // notebook page index -> export (output) page index for the pages being written.
+    std::unordered_map<int, int> notebookToExport;
+    notebookToExport.reserve(static_cast<size_t>(exportedPages.size()));
+    for (int i = 0; i < exportedPages.size(); ++i) {
+        notebookToExport[exportedPages[i]] = i;
+    }
+
+    // Resolve an aggregated item to its output page index. Items carry
+    // (sourceId, targetPage) in the source's ORIGINAL page space; reachable
+    // entries already point at a present page (aggregatedOutline floor-redirects),
+    // while headers/roots and inert context entries have targetPage < 0 (or resolve
+    // to a page outside this export) and become destination-less titles.
+    Document* doc = m_document;
+    auto exportIndexOf = [doc, &notebookToExport](const PdfOutlineItem& it) -> int {
+        if (it.targetPage < 0) {
+            return -1;
+        }
+        const int nb = doc->notebookPageIndexForSourcePage(it.sourceId, it.targetPage);
+        if (nb < 0) {
+            return -1;
+        }
+        auto f = notebookToExport.find(nb);
+        return (f != notebookToExport.end()) ? f->second : -1;
+    };
+
     fz_try(m_ctx) {
-        pdf_obj* outlines = writeOutlineRecursive(m_ctx, m_outputDoc, srcOutline, pdfToExportIndex);
-        
-        if (outlines) {
-            // Set the document catalog's Outlines entry
+        pdf_obj* root = buildAggregatedOutline(m_ctx, m_outputDoc, outline, exportIndexOf);
+        if (root) {
             pdf_obj* catalog = pdf_dict_get(m_ctx, pdf_trailer(m_ctx, m_outputDoc), PDF_NAME(Root));
             if (catalog) {
-                pdf_dict_put(m_ctx, catalog, PDF_NAME(Outlines), outlines);
+                pdf_dict_put(m_ctx, catalog, PDF_NAME(Outlines), root);
                 pdf_dict_put(m_ctx, catalog, PDF_NAME(PageMode), PDF_NAME(UseOutlines));
             }
         }
-    }
-    fz_always(m_ctx) {
-        fz_drop_outline(m_ctx, srcOutline);
     }
     fz_catch(m_ctx) {
         qWarning() << "[MuPdfExporter] Failed to write outline:" << fz_caught_message(m_ctx);
         return false;
     }
-    
+
     #ifdef SPEEDYNOTE_DEBUG
-    qDebug() << "[MuPdfExporter] Wrote outline with" << pdfToExportIndex.size() << "PDF page mappings";
+    qDebug() << "[MuPdfExporter] Wrote aggregated outline with" << outline.size() << "top-level item(s)";
     #endif
     return true;
 }
 
 /**
- * Static helper to recursively build outline tree for output PDF.
- * Uses fz_outline which cannot be forward-declared in the header.
+ * OUT2: recursively build the exported bookmark tree from a Document
+ * aggregatedOutline() subtree. Every item in the passed vector is emitted (the
+ * aggregated tree is already pruned/greyed upstream): items whose exportIndexOf()
+ * resolves get a /Dest [page /Fit]; headers, source roots and inert context
+ * entries are emitted as destination-less titles. Returns the container dict
+ * (Type /Outlines) holding these items, or nullptr for an empty level.
+ *
+ * Outline items MUST be indirect objects (pdf_add_object): pdf_save_document
+ * otherwise recurses infinitely in pdf_set_obj_parent while serializing the tree.
  */
-static pdf_obj* writeOutlineRecursive(fz_context* ctx, pdf_document* outputDoc,
-                                      fz_outline* srcOutline,
-                                      const std::map<int, int>& pdfToExportIndex)
+static pdf_obj* buildAggregatedOutline(fz_context* ctx, pdf_document* outputDoc,
+                                       const QVector<PdfOutlineItem>& items,
+                                       const std::function<int(const PdfOutlineItem&)>& exportIndexOf)
 {
-    if (!srcOutline || !outputDoc || !ctx) {
+    if (items.isEmpty() || !outputDoc || !ctx) {
         return nullptr;
     }
-    
-    // First pass: collect valid outline entries (those pointing to exported pages)
-    // We need this to set up First/Last/Prev/Next pointers correctly
-    struct OutlineEntry {
-        fz_outline* src;
-        int exportPageIndex;
-        pdf_obj* pdfObj;
-        pdf_obj* childrenContainer;  // Store children result from recursive call
-    };
-    std::vector<OutlineEntry> validEntries;
-    
-    for (fz_outline* ol = srcOutline; ol; ol = ol->next) {
-        int pdfPage = ol->page.page;
-        
-        // Check if this entry points to an exported page
-        auto it = pdfToExportIndex.find(pdfPage);
-        bool pointsToExportedPage = (it != pdfToExportIndex.end());
-        
-        // For entries with children, we need to check if any child (recursively)
-        // points to an exported page. We do this by attempting the recursive call
-        // and seeing if it produces any valid entries.
-        pdf_obj* childrenContainer = nullptr;
-        bool hasValidChildren = false;
-        
-        if (ol->down) {
-            childrenContainer = writeOutlineRecursive(ctx, outputDoc, ol->down, pdfToExportIndex);
-            hasValidChildren = (childrenContainer != nullptr);
-        }
-        
-        // Entry is valid if:
-        // - It points to an exported page, OR
-        // - It has children that recursively contain valid entries
-        if (pointsToExportedPage || hasValidChildren) {
-            OutlineEntry entry;
-            entry.src = ol;
-            entry.exportPageIndex = pointsToExportedPage ? it->second : -1;
-            entry.pdfObj = nullptr;
-            entry.childrenContainer = childrenContainer;
-            validEntries.push_back(entry);
-        }
-        // If neither condition is met, the entry and its children are all outside
-        // the export range - skip it entirely
-    }
-    
-    if (validEntries.empty()) {
-        return nullptr;
-    }
-    
-    // Create outline items
-    for (size_t i = 0; i < validEntries.size(); ++i) {
-        OutlineEntry& entry = validEntries[i];
-        fz_outline* ol = entry.src;
-        
-        // Create the outline item dictionary and add it as an indirect object
-        // This is crucial - pdf_new_dict creates a direct object, but outline items
-        // need to be indirect objects (with proper object numbers) for the PDF's
-        // xref table. Without this, pdf_save_document causes infinite recursion
-        // in pdf_set_obj_parent when trying to serialize the object tree.
+
+    struct Built { const PdfOutlineItem* item; pdf_obj* obj; };
+    std::vector<Built> entries;
+    entries.reserve(static_cast<size_t>(items.size()));
+
+    for (const PdfOutlineItem& it : items) {
+        // Recurse first so children exist before we wire First/Last/Count.
+        pdf_obj* childContainer = it.children.isEmpty()
+            ? nullptr
+            : buildAggregatedOutline(ctx, outputDoc, it.children, exportIndexOf);
+
         pdf_obj* item = pdf_new_dict(ctx, outputDoc, 6);
         item = pdf_add_object(ctx, outputDoc, item);
-        entry.pdfObj = item;
-        
-        // Set title
-        if (ol->title && ol->title[0]) {
-            pdf_dict_put_text_string(ctx, item, PDF_NAME(Title), ol->title);
+
+        const QByteArray titleUtf8 = it.title.toUtf8();
+        if (!titleUtf8.isEmpty()) {
+            pdf_dict_put_text_string(ctx, item, PDF_NAME(Title), titleUtf8.constData());
         }
-        
-        // Set destination if this entry points to an exported page
-        if (entry.exportPageIndex >= 0) {
-            // Create destination array: [page /Fit] or [page /XYZ x y z]
-            // For simplicity, use /Fit (fit page in window)
+
+        const int exportIdx = exportIndexOf(it);
+        if (exportIdx >= 0) {
             pdf_obj* dest = pdf_new_array(ctx, outputDoc, 2);
-            
-            // Get the page object by index
-            pdf_obj* pageRef = pdf_lookup_page_obj(ctx, outputDoc, entry.exportPageIndex);
+            pdf_obj* pageRef = pdf_lookup_page_obj(ctx, outputDoc, exportIdx);
             pdf_array_push(ctx, dest, pageRef);
             pdf_array_push(ctx, dest, PDF_NAME(Fit));
-            
             pdf_dict_put_drop(ctx, item, PDF_NAME(Dest), dest);
         }
-        
-        // Handle children (already processed in first pass)
-        if (entry.childrenContainer) {
-            pdf_obj* children = entry.childrenContainer;
-            // children is the root outline object, get First/Last from it
-            pdf_obj* firstChild = pdf_dict_get(ctx, children, PDF_NAME(First));
-            pdf_obj* lastChild = pdf_dict_get(ctx, children, PDF_NAME(Last));
-            int childCount = pdf_dict_get_int(ctx, children, PDF_NAME(Count));
-            
+
+        if (childContainer) {
+            pdf_obj* firstChild = pdf_dict_get(ctx, childContainer, PDF_NAME(First));
+            pdf_obj* lastChild = pdf_dict_get(ctx, childContainer, PDF_NAME(Last));
+            const int childCount = pdf_dict_get_int(ctx, childContainer, PDF_NAME(Count));
             if (firstChild && lastChild) {
                 pdf_dict_put(ctx, item, PDF_NAME(First), firstChild);
                 pdf_dict_put(ctx, item, PDF_NAME(Last), lastChild);
-                
-                // Set parent on all children
-                for (pdf_obj* child = firstChild; child; 
+                for (pdf_obj* child = firstChild; child;
                      child = pdf_dict_get(ctx, child, PDF_NAME(Next))) {
                     pdf_dict_put(ctx, child, PDF_NAME(Parent), item);
                 }
-                
-                // Set Count (negative means closed)
-                int count = ol->is_open ? childCount : -childCount;
+                // Count sign encodes open/closed; magnitude is the direct child count.
+                const int count = it.isOpen ? childCount : -childCount;
                 if (count != 0) {
                     pdf_dict_put_int(ctx, item, PDF_NAME(Count), count);
                 }
             }
         }
+
+        entries.push_back({&it, item});
     }
-    
-    // Link items with Prev/Next
-    for (size_t i = 0; i < validEntries.size(); ++i) {
-        pdf_obj* item = validEntries[i].pdfObj;
-        
+
+    // Link siblings with Prev/Next.
+    for (size_t i = 0; i < entries.size(); ++i) {
         if (i > 0) {
-            pdf_dict_put(ctx, item, PDF_NAME(Prev), validEntries[i-1].pdfObj);
+            pdf_dict_put(ctx, entries[i].obj, PDF_NAME(Prev), entries[i - 1].obj);
         }
-        if (i < validEntries.size() - 1) {
-            pdf_dict_put(ctx, item, PDF_NAME(Next), validEntries[i+1].pdfObj);
+        if (i + 1 < entries.size()) {
+            pdf_dict_put(ctx, entries[i].obj, PDF_NAME(Next), entries[i + 1].obj);
         }
     }
-    
-    // Create container with First/Last/Count
-    // The container also needs to be an indirect object for proper xref handling
+
     pdf_obj* container = pdf_new_dict(ctx, outputDoc, 4);
     container = pdf_add_object(ctx, outputDoc, container);
     pdf_dict_put(ctx, container, PDF_NAME(Type), PDF_NAME(Outlines));
-    pdf_dict_put(ctx, container, PDF_NAME(First), validEntries.front().pdfObj);
-    pdf_dict_put(ctx, container, PDF_NAME(Last), validEntries.back().pdfObj);
-    pdf_dict_put_int(ctx, container, PDF_NAME(Count), static_cast<int>(validEntries.size()));
-    
-    // Set Parent on top-level items to point to the container
-    for (const auto& entry : validEntries) {
-        pdf_dict_put(ctx, entry.pdfObj, PDF_NAME(Parent), container);
+    pdf_dict_put(ctx, container, PDF_NAME(First), entries.front().obj);
+    pdf_dict_put(ctx, container, PDF_NAME(Last), entries.back().obj);
+    pdf_dict_put_int(ctx, container, PDF_NAME(Count), static_cast<int>(entries.size()));
+    for (const Built& b : entries) {
+        pdf_dict_put(ctx, b.obj, PDF_NAME(Parent), container);
     }
-    
+
     return container;
 }
 

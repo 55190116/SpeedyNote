@@ -35,6 +35,22 @@ public:
      */
     QPoint lastPressPosition() const { return m_pressPos; }
     
+    /**
+     * @brief Whether the last press that produced a click came from touch input.
+     * Used by PagePanel to decide whether to toggle selection on a tap in
+     * select mode (touch), versus deferring to native ExtendedSelection (mouse).
+     */
+    bool wasLastPressTouch() const { return m_isTouchInput; }
+
+    /**
+     * @brief Enable/disable multi-select mode (Plan D2).
+     *
+     * In select mode, drag initiation (mouse startDrag and touch long-press)
+     * emits selectionDragRequested() so PagePanel can build a custom multi-page
+     * cross-document transfer drag, instead of the single-index reorder drag.
+     */
+    void setSelectMode(bool enabled) { m_selectMode = enabled; }
+
 signals:
     /**
      * @brief Emitted when a drag should start for the given index.
@@ -43,6 +59,13 @@ signals:
      * Connect this to manually start a QDrag operation.
      */
     void dragRequested(const QModelIndex& index);
+
+    /**
+     * @brief Emitted (in select mode) when a multi-page transfer drag should
+     *        start. PagePanel builds and execs the QDrag from the current
+     *        selection.
+     */
+    void selectionDragRequested();
 
 protected:
     void mousePressEvent(QMouseEvent* event) override;
@@ -67,6 +90,7 @@ private:
     QModelIndex m_pressedIndex;     // Index that was pressed
     bool m_longPressTriggered = false;
     bool m_isTouchInput = false;    // True if current input is touch (not stylus/mouse)
+    bool m_selectMode = false;      // Plan D2: multi-select drag source mode
     
     // Manual touch scrolling state
     int m_touchScrollStartPos = 0;  // Scroll position at touch start
