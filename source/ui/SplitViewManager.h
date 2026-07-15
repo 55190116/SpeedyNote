@@ -15,12 +15,6 @@
 #include <QSplitter>
 #include <QHBoxLayout>
 #include <QVector>
-#include <QList>
-#include <QSet>
-#include <QHash>
-#include <QSize>
-#include <QRect>
-#include <QPixmap>
 #include <QPointer>
 
 class TabBar;
@@ -29,7 +23,6 @@ class Document;
 class DocumentViewport;
 class QStackedWidget;
 class ViewportScrollBar;
-class ThumbnailRenderer;
 class QTimer;
 
 class SplitViewManager : public QWidget {
@@ -148,15 +141,6 @@ public:
      */
     void updateScrollBarDocumentMap(DocumentViewport* vp);
 
-    /**
-     * @brief Rebuild the SB3 low-res thumbnail strip for whichever pane is bound
-     *        to @p vp (async, memory-bounded, band-sampled).
-     *
-     * Call on structure/import changes. A null @p vp or a vp not currently bound
-     * to a pane is a no-op. Cheap to call; it cancels in-flight work and refeeds.
-     */
-    void rebuildScrollBarThumbnails(DocumentViewport* vp);
-
 signals:
     void activeViewportChanged(DocumentViewport* viewport);
     void activePaneChanged(Pane pane);
@@ -199,21 +183,6 @@ private:
         QMetaObject::Connection cVToView;
         QMetaObject::Connection cHToView;
         QMetaObject::Connection cMarker;   // SB2: vBar markerActivated -> scrollToPage
-
-        // --- SB3: low-res thumbnail strip ---
-        // Memory-bounded: exactly ONE composited strip pixmap (sized to the
-        // track in device px, not the document); per-page thumbnails are painted
-        // into it and discarded, never cached.
-        ThumbnailRenderer* thumbRenderer = nullptr;  // per-pane async renderer
-        QPixmap strip;                     // single composited strip (bounded by track px)
-        QList<int> stripQueue;             // sampled pages awaiting render
-        QSet<int> stripInFlight;           // pages requested, awaiting thumbnailReady
-        QHash<int, QRect> stripSlots;      // shown page -> its slot rect in strip device px
-        QSize stripPxSize;                 // track px size the current strip was built for
-        QTimer* stripEditTimer = nullptr;  // debounce visible-page edit -> single slice
-        int pendingEditPage = -1;          // page to refresh when stripEditTimer fires
-        QMetaObject::Connection cThumbReady;    // thumbRenderer::thumbnailReady
-        QMetaObject::Connection cPageModified;  // vp::pageModified -> debounced slice
     };
 
     QStackedWidget* stackForPane(Pane pane) const;
@@ -226,13 +195,6 @@ private:
     void showScrollBars(Pane pane);
     void hideScrollBars(Pane pane);
     void applyScrollBarDarkMode();
-
-    // --- SB3 helpers ---
-    void rebuildThumbnailStrip(Pane pane);
-    void refreshThumbnailSlice(Pane pane, int page);
-    void feedThumbnailQueue(Pane pane);
-    void compositeThumbnailSlice(Pane pane, int page, const QPixmap& pixmap);
-
     void proximityFloatCheck(QEvent* event);
     void checkPaneProximity(Pane pane, const QPointF& globalPos);
     static bool defaultScrollBarsPinned();
@@ -261,8 +223,4 @@ private:
     // Enhanced scroll bars (SB1), indexed by Pane (Left=0, Right=1)
     PaneBars m_paneBars[2];
     bool m_scrollBarsPinned = true;
-
-    // SB3: coalesces resize ticks into a single strip rebuild per pane whose
-    // track size actually changed (avoids thrashing cancelAll() during drag).
-    QTimer* m_stripResizeTimer = nullptr;
 };

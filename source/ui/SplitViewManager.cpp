@@ -6,7 +6,6 @@
 #include "TabBar.h"
 #include "TabManager.h"
 #include "widgets/ViewportScrollBar.h"
-#include "ThumbnailRenderer.h"
 #include "../core/DocumentViewport.h"
 #include "../core/Document.h"
 #include "../core/DarkModeUtils.h"
@@ -20,7 +19,6 @@
 #include <QSettings>
 #include <QInputDevice>
 #include <QHash>
-#include <QPainter>
 
 // ============================================================================
 // Constructor / Destructor
@@ -96,21 +94,6 @@ SplitViewManager::SplitViewManager(QWidget* parent)
         m_scrollBarsPinned = settings.value(QStringLiteral("scrollbar/pinned"),
                                              defaultScrollBarsPinned()).toBool();
     }
-
-    // SB3: debounce timer that rebuilds any pane's thumbnail strip once its track
-    // size settles after a resize.
-    m_stripResizeTimer = new QTimer(this);
-    m_stripResizeTimer->setSingleShot(true);
-    m_stripResizeTimer->setInterval(150);
-    connect(m_stripResizeTimer, &QTimer::timeout, this, [this]() {
-        for (int i = 0; i < 2; ++i) {
-            PaneBars& b = m_paneBars[i];
-            if (b.vBar && b.bound && b.vBar->trackContentPixelSize() != b.stripPxSize) {
-                rebuildThumbnailStrip(static_cast<Pane>(i));
-            }
-        }
-    });
-
     createScrollBars(Left);
 }
 
@@ -613,21 +596,6 @@ void SplitViewManager::createScrollBars(Pane pane)
         hideScrollBars(pane);
     });
 
-    // SB3: per-pane async thumbnail renderer + single-slice edit debounce.
-    b.thumbRenderer = new ThumbnailRenderer(this);
-    b.thumbRenderer->setMaxConcurrentRenders(2);
-    b.cThumbReady = connect(b.thumbRenderer, &ThumbnailRenderer::thumbnailReady, this,
-                            [this, pane](int pageIndex, QPixmap pixmap) {
-        compositeThumbnailSlice(pane, pageIndex, pixmap);
-    });
-    b.stripEditTimer = new QTimer(this);
-    b.stripEditTimer->setSingleShot(true);
-    b.stripEditTimer->setInterval(400);  // "between intra-page actions"
-    connect(b.stripEditTimer, &QTimer::timeout, this, [this, pane]() {
-        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
-        if (pb.pendingEditPage >= 0) refreshThumbnailSlice(pane, pb.pendingEditPage);
-    });
-
     // Initial visibility follows the pin state.
     b.vBar->setVisible(m_scrollBarsPinned);
     b.hBar->setVisible(m_scrollBarsPinned);
@@ -644,11 +612,7 @@ void SplitViewManager::destroyScrollBars(Pane pane)
     disconnect(b.cVToView);
     disconnect(b.cHToView);
     disconnect(b.cMarker);
-    disconnect(b.cThumbReady);
-    disconnect(b.cPageModified);
     if (b.fadeTimer) { b.fadeTimer->stop(); delete b.fadeTimer; }
-    if (b.stripEditTimer) { b.stripEditTimer->stop(); delete b.stripEditTimer; }
-    if (b.thumbRenderer) { b.thumbRenderer->cancelAll(); delete b.thumbRenderer; }
     delete b.vBar;
     delete b.hBar;
     b = PaneBars{};
@@ -660,38 +624,23 @@ void SplitViewManager::repositionScrollBars(Pane pane)
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
     if (!stack || !b.vBar || !b.hBar) return;
 
-    const int vThickness = ViewportScrollBar::barThickness(Qt::Vertical);
-    const int hThickness = ViewportScrollBar::barThickness(Qt::Horizontal);
+    const int thickness = ViewportScrollBar::barThickness();
     const int margin = 3;
+    const int corner = 15;  // gap where the two bars would meet
     const int w = stack->width();
     const int h = stack->height();
 
     // Vertical (page-axis) bar on the LEFT edge; horizontal (cross-axis) on TOP.
-    // Each bar's start offset clears the perpendicular bar's thickness so the
-    // wider vertical bar never overlaps the horizontal one at the corner.
-    const int vTop = hThickness + margin * 2;   // vBar starts below the hBar
-    const int hLeft = vThickness + margin * 2;  // hBar starts right of the vBar
     b.vBar->setGeometry(margin,
-                        vTop,
-                        vThickness,
-                        qMax(0, h - vTop - margin));
-    b.hBar->setGeometry(hLeft,
+                        corner + margin,
+                        thickness,
+                        qMax(0, h - corner - margin * 2));
+    b.hBar->setGeometry(corner + margin,
                         margin,
-                        qMax(0, w - hLeft - margin),
-                        hThickness);
+                        qMax(0, w - corner - margin * 2),
+                        thickness);
     b.vBar->raise();
     b.hBar->raise();
-
-    // SB3: build (first valid layout) or re-lay (size changed) the strip;
-    // coalesce rapid resize ticks into a single rebuild once the size settles.
-    // stripPxSize is empty until the first successful build, so this also drives
-    // the initial build once the bar finally has a real track size.
-    if (b.bound && m_stripResizeTimer) {
-        const QSize trackPx = b.vBar->trackContentPixelSize();
-        if (!trackPx.isEmpty() && trackPx != b.stripPxSize) {
-            m_stripResizeTimer->start();
-        }
-    }
 }
 
 void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
@@ -705,21 +654,7 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     disconnect(b.cVToView);
     disconnect(b.cHToView);
     disconnect(b.cMarker);
-    disconnect(b.cPageModified);
     b.cViewToV = b.cViewToH = b.cVToView = b.cHToView = b.cMarker = QMetaObject::Connection{};
-    b.cPageModified = QMetaObject::Connection{};
-
-    // SB3: dropping the old viewport invalidates any in-flight strip work and
-    // frees the composited strip so it never lingers for a closed document.
-    if (b.thumbRenderer) b.thumbRenderer->cancelAll();
-    b.stripQueue.clear();
-    b.stripInFlight.clear();
-    b.stripSlots.clear();
-    b.pendingEditPage = -1;
-    if (b.stripEditTimer) b.stripEditTimer->stop();
-    b.strip = QPixmap();
-    b.stripPxSize = QSize();
-    if (b.vBar) b.vBar->setThumbnailStrip(QPixmap());
 
     b.bound = vp;
     if (!vp) return;
@@ -778,19 +713,6 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
 
     // SB2: compute the per-source accent + link-marker document map now.
     updateScrollBarDocumentMap(vp);
-
-    // SB3: a visible-page edit refreshes only that page's slice (debounced),
-    // so the strip stays cheap during drawing.
-    b.cPageModified = connect(vp, &DocumentViewport::pageModified, this,
-                              [this, pane](int pageIndex) {
-        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
-        if (pageIndex < 0 || !pb.stripEditTimer) return;
-        pb.pendingEditPage = pageIndex;
-        pb.stripEditTimer->start();
-    });
-
-    // SB3: build the low-res thumbnail strip for the new viewport.
-    rebuildThumbnailStrip(pane);
 
     // Keep the bars above the (possibly newly shown) viewport.
     b.vBar->raise();
@@ -877,175 +799,6 @@ void SplitViewManager::updateScrollBarDocumentMap(DocumentViewport* vp)
     b.vBar->setMarkers(markers);
 }
 
-// ============================================================================
-// SB3: low-res thumbnail strip
-// ============================================================================
-//
-// Memory model: there is exactly ONE composited strip pixmap per pane, sized to
-// the bar's track in device pixels (a few hundred KB, independent of page
-// count). Per-page thumbnails are rendered tiny, painted into the strip, and
-// discarded -- we never keep a per-page pixmap cache. Render count is bounded by
-// band-sampling the track (one representative page per ~6px band), so even a
-// multi-thousand-page PDF triggers only a few hundred tiny async renders.
-
-void SplitViewManager::rebuildScrollBarThumbnails(DocumentViewport* vp)
-{
-    if (!vp) return;
-    for (int i = 0; i < 2; ++i) {
-        if (m_paneBars[i].bound == vp) { rebuildThumbnailStrip(static_cast<Pane>(i)); return; }
-    }
-}
-
-void SplitViewManager::rebuildThumbnailStrip(Pane pane)
-{
-    PaneBars& b = m_paneBars[static_cast<int>(pane)];
-    if (!b.vBar || !b.thumbRenderer) return;
-
-    DocumentViewport* vp = b.bound;
-    Document* doc = vp ? vp->document() : nullptr;
-
-    // Free the strip and cancel work when there's nothing to show (this also
-    // covers edgeless documents, which have no page track).
-    auto clearStrip = [&]() {
-        b.thumbRenderer->cancelAll();
-        b.stripQueue.clear();
-        b.stripInFlight.clear();
-        b.stripSlots.clear();
-        b.strip = QPixmap();
-        b.stripPxSize = QSize();
-        b.vBar->setThumbnailStrip(QPixmap());
-    };
-    if (!doc || doc->pageCount() <= 0 || doc->isEdgeless()) { clearStrip(); return; }
-
-    const QSize pxSize = b.vBar->trackContentPixelSize();
-    if (pxSize.isEmpty()) { clearStrip(); return; }  // bar not laid out yet
-
-    // Barrier: cancelAll() cancels + waits, so no stale thumbnailReady survives
-    // to paint onto a page whose identity changed (e.g. after a reorder).
-    b.thumbRenderer->cancelAll();
-    b.stripQueue.clear();
-    b.stripInFlight.clear();
-
-    // PDF inversion must match the on-screen viewport.
-    b.thumbRenderer->setPdfDarkMode(vp->isDarkMode() && vp->isPdfDarkModeEnabled());
-
-    // Allocate the single composited strip in raw device pixels (no DPR tag: the
-    // bar scales it into the logical track rect). Transparent base so blank
-    // track (few-page docs / letterbox) shows the real track background through.
-    QPixmap strip(pxSize);
-    strip.fill(Qt::transparent);
-    b.strip = strip;
-    b.stripPxSize = pxSize;
-    b.stripSlots.clear();
-
-    // Filmstrip layout: aspect-correct thumbnails evenly spread across the bar.
-    // Slot height comes from a representative page aspect so each thumbnail is
-    // readable rather than squished into a 1px scroll-position slice. maxFit caps
-    // how many pages we show so slivers never become unreadable.
-    const int stripW = pxSize.width();
-    const int stripH = pxSize.height();
-    const int pageCount = doc->pageCount();
-
-    QSizeF p0 = doc->pageSizeAt(0);
-    if (p0.width() <= 0.0 || p0.height() <= 0.0) p0 = QSizeF(612, 792);  // US Letter
-    const qreal aspect = p0.height() / p0.width();
-    const int slotH = qMax(1, qRound(stripW * aspect));
-
-    const int maxFit = qMax(1, stripH / slotH);
-    const int shownCount = qMin(pageCount, maxFit);
-
-    // Spread the shown pages evenly across the FULL bar height in equal bands.
-    // Each thumbnail is drawn at its natural aspect ratio and centered in its
-    // band (see compositeThumbnailSlice), so few-page docs read as "page, blank,
-    // page, blank..." with the solid bar background as the filler, while
-    // full docs pack edge-to-edge (band ~= natural thumbnail height).
-    for (int k = 0; k < shownCount; ++k) {
-        // Evenly sample across the whole document (k=0 -> first, last -> last).
-        int page = static_cast<int>((static_cast<qint64>(k) * pageCount) / shownCount
-                                    + pageCount / (2 * shownCount));
-        page = qBound(0, page, pageCount - 1);
-        // Distinct pages only (guard against collisions when shownCount ~ pageCount).
-        if (b.stripSlots.contains(page)) continue;
-        const int y0 = static_cast<int>((static_cast<qint64>(k) * stripH) / shownCount);
-        const int y1 = static_cast<int>((static_cast<qint64>(k + 1) * stripH) / shownCount);
-        b.stripSlots.insert(page, QRect(0, y0, stripW, qMax(1, y1 - y0)));
-        b.stripQueue.append(page);
-    }
-
-    // Show the (transparent) strip immediately (accents/handle/markers already
-    // paint); thumbnails fill in asynchronously.
-    b.vBar->setThumbnailStrip(b.strip);
-    feedThumbnailQueue(pane);
-}
-
-void SplitViewManager::feedThumbnailQueue(Pane pane)
-{
-    PaneBars& b = m_paneBars[static_cast<int>(pane)];
-    if (!b.thumbRenderer || !b.vBar) return;
-    DocumentViewport* vp = b.bound;
-    Document* doc = vp ? vp->document() : nullptr;
-    if (!doc || b.stripPxSize.isEmpty()) return;
-
-    const qreal dpr = b.vBar->devicePixelRatioF();
-    const int wLogical = qMax(1, qRound(b.stripPxSize.width() / dpr));
-
-    // Keep at most kMaxInFlight requests outstanding. The renderer runs 2
-    // concurrently and drops nothing below its 8-deep queue, so 6 never overflows.
-    constexpr int kMaxInFlight = 6;
-    while (b.stripInFlight.size() < kMaxInFlight && !b.stripQueue.isEmpty()) {
-        const int page = b.stripQueue.takeFirst();
-        if (page < 0 || page >= doc->pageCount() || b.stripInFlight.contains(page)) continue;
-        b.stripInFlight.insert(page);
-        b.thumbRenderer->requestThumbnail(doc, page, wLogical, dpr);
-    }
-}
-
-void SplitViewManager::compositeThumbnailSlice(Pane pane, int page, const QPixmap& pixmap)
-{
-    PaneBars& b = m_paneBars[static_cast<int>(pane)];
-    b.stripInFlight.remove(page);
-
-    // Only pages that are part of the current filmstrip have a slot; ignore
-    // stale results for pages no longer shown.
-    if (b.vBar && !b.strip.isNull() && !pixmap.isNull() && b.stripSlots.contains(page)) {
-        const QRect slot = b.stripSlots.value(page);
-        // Scale the thumbnail to fit the slot preserving aspect ratio, centered
-        // (letterbox rather than distort), so mixed page sizes stay undistorted.
-        const QSize scaled = pixmap.size().scaled(slot.size(), Qt::KeepAspectRatio);
-        const int dx = slot.x() + (slot.width() - scaled.width()) / 2;
-        const int dy = slot.y() + (slot.height() - scaled.height()) / 2;
-
-        QPainter p(&b.strip);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        // Clear the slot first so a single-page refresh overwrites cleanly.
-        p.setCompositionMode(QPainter::CompositionMode_Source);
-        p.fillRect(slot, Qt::transparent);
-        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        p.drawPixmap(QRect(dx, dy, scaled.width(), scaled.height()), pixmap);
-        p.end();
-        b.vBar->setThumbnailStrip(b.strip);
-    }
-    // pixmap is a local copy and goes out of scope here -- no per-page cache.
-    feedThumbnailQueue(pane);
-}
-
-void SplitViewManager::refreshThumbnailSlice(Pane pane, int page)
-{
-    PaneBars& b = m_paneBars[static_cast<int>(pane)];
-    if (!b.thumbRenderer || !b.vBar || b.strip.isNull() || b.stripPxSize.isEmpty()) return;
-    DocumentViewport* vp = b.bound;
-    Document* doc = vp ? vp->document() : nullptr;
-    if (!doc || page < 0 || page >= doc->pageCount()) return;
-    // Only refresh pages that are actually part of the current filmstrip.
-    if (!b.stripSlots.contains(page)) return;
-    if (b.stripInFlight.contains(page)) return;  // already being rendered
-
-    const qreal dpr = b.vBar->devicePixelRatioF();
-    const int wLogical = qMax(1, qRound(b.stripPxSize.width() / dpr));
-    b.stripInFlight.insert(page);
-    b.thumbRenderer->requestThumbnail(doc, page, wLogical, dpr);
-}
-
 void SplitViewManager::refreshHandleSizes(Pane pane)
 {
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
@@ -1097,8 +850,6 @@ void SplitViewManager::applyScrollBarDarkMode()
         if (m_paneBars[i].hBar) m_paneBars[i].hBar->setDarkMode(m_darkMode);
         // SB2 accent colors are theme-dependent, so recompute the document map.
         if (m_paneBars[i].bound) updateScrollBarDocumentMap(m_paneBars[i].bound);
-        // SB3 thumbnails depend on the theme (PDF inversion + page base color).
-        if (m_paneBars[i].bound) rebuildThumbnailStrip(static_cast<Pane>(i));
     }
 }
 

@@ -21,8 +21,6 @@
 #include <QColor>
 #include <QString>
 #include <QVector>
-#include <QPixmap>
-#include <QSize>
 
 class ViewportScrollBar : public QWidget {
     Q_OBJECT
@@ -69,27 +67,14 @@ public:
 
     bool isDragging() const { return m_dragging; }
 
-    // The fixed thickness of the bar along its minor axis. The page-axis
-    // (vertical) bar is wider so its low-res thumbnail filmstrip is legible;
-    // the cross-axis (horizontal) bar keeps the slim default.
-    static int barThickness(Qt::Orientation o) { return o == Qt::Vertical ? 32 : 16; }
+    // The fixed thickness of the bar along its minor axis.
+    static int barThickness() { return 16; }
 
     // SB2: document-map content. Both are no-ops on horizontal bars (the map
     // is a page-axis concept). Stored and repainted; positions are track
     // fractions already mapped by the controller.
     void setAccentRegions(const QVector<AccentRegion>& regions);
     void setMarkers(const QVector<BarMarker>& markers);
-
-    // SB3: low-res thumbnail strip painted as the track background (behind the
-    // accent stripe and marker ticks). No-op on horizontal bars (page-axis
-    // concept). The controller composites and sizes the strip; the bar just
-    // paints it clipped to the rounded track.
-    void setThumbnailStrip(const QPixmap& strip);
-
-    // SB3: device-pixel size of the track's drawable rect, so the controller can
-    // allocate a strip pixmap that maps 1:1 onto the painted track. Returns an
-    // empty size when there is no usable track.
-    QSize trackContentPixelSize() const;
 
 public slots:
     // Programmatic position update (from the viewport). Does NOT emit
@@ -127,6 +112,7 @@ private:
     int markerAtPos(qreal pos) const;       // index into m_markers within hit band, or -1
     QColor legibleMarkerColor(const QColor& raw) const;
 
+    QColor trackColor() const;
     QColor handleColor() const;
 
     Qt::Orientation m_orientation;
@@ -143,7 +129,6 @@ private:
 
     QVector<AccentRegion> m_accents;  // SB2: per-source color bands
     QVector<BarMarker> m_markers;     // SB2: link/search ticks
-    QPixmap m_thumbStrip;             // SB3: composited low-res page strip
 
     static constexpr int kMinHandlePx = 40;
     static constexpr qreal kMarkerHitBandPx = 6.0;  // half-width of tick hit zone
