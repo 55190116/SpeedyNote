@@ -870,6 +870,23 @@ public:
      * @return Size of the content area containing all pages.
      */
     QSizeF totalContentSize() const;
+
+    /**
+     * @brief Normalized track position (0.0-1.0) of a page's top edge.
+     *
+     * SB2: maps a notebook page index to the same 0.0-1.0 space the vertical
+     * scroll-bar handle's top uses, so a marker/accent painted at this fraction
+     * lands exactly where the handle sits when that page reaches the top.
+     * Derived from the cumulative per-page Y offsets and total content height
+     * (content coordinates, so zoom-independent), using page-size metadata only
+     * -- no page content is loaded.
+     *
+     * @param pageIndex 0-based page index. Values <= 0 return 0.0; values >=
+     *        pageCount return 1.0 (bottom of the last page).
+     * @return Track fraction in [0.0, 1.0], or -1.0 when there is no layout
+     *         (edgeless mode or zero content height).
+     */
+    qreal pageTrackFraction(int pageIndex) const;
     
     /**
      * @brief Find which page contains a point in document coordinates.

@@ -3554,7 +3554,8 @@ Document::extractLinkOutlineFromPage(const Page* page,
                                       int pageIdx,
                                       int tileX,
                                       int tileY,
-                                      bool edgeless)
+                                      bool edgeless,
+                                      bool requireMarkdown)
 {
     QVector<LinkOutlineEntry> out;
     if (!page) return out;
@@ -3576,7 +3577,7 @@ Document::extractLinkOutlineFromPage(const Page* page,
             if (s.markdownNoteId.isEmpty()) continue;
             entry.markdownSlots.push_back({ i, s.markdownNoteId });
         }
-        if (entry.markdownSlots.isEmpty()) continue;
+        if (requireMarkdown && entry.markdownSlots.isEmpty()) continue;
 
         entry.linkObjectId = link->id;
         entry.description  = link->description;
@@ -3598,7 +3599,8 @@ Document::extractLinkOutlineFromJsonObjects(const QJsonArray& objects,
                                              int  pageIndex,
                                              int  tileX,
                                              int  tileY,
-                                             const QPointF& tileOrigin)
+                                             const QPointF& tileOrigin,
+                                             bool requireMarkdown)
 {
     QVector<LinkOutlineEntry> out;
     const QColor kDefaultIcon(100, 100, 100, 180);
@@ -3620,7 +3622,7 @@ Document::extractLinkOutlineFromJsonObjects(const QJsonArray& objects,
             if (noteId.isEmpty()) continue;
             entry.markdownSlots.push_back({ i, noteId });
         }
-        if (entry.markdownSlots.isEmpty()) continue;
+        if (requireMarkdown && entry.markdownSlots.isEmpty()) continue;
 
         entry.linkObjectId = o["id"].toString();
         entry.description  = o["description"].toString();
@@ -3649,7 +3651,7 @@ Document::extractLinkOutlineFromJsonObjects(const QJsonArray& objects,
 // -------- Disk peek: tile JSON → outline entries ---------------------------
 
 QVector<LinkOutlineEntry>
-Document::peekTileLinkOutlineFromDisk(TileCoord coord) const
+Document::peekTileLinkOutlineFromDisk(TileCoord coord, bool requireMarkdown) const
 {
     if (m_bundlePath.isEmpty()) return {};
 
@@ -3667,13 +3669,13 @@ Document::peekTileLinkOutlineFromDisk(TileCoord coord) const
                               coord.second * static_cast<qreal>(EDGELESS_TILE_SIZE));
     return extractLinkOutlineFromJsonObjects(
         jd.object()["objects"].toArray(),
-        /*pageIndex=*/ -1, coord.first, coord.second, tileOrigin);
+        /*pageIndex=*/ -1, coord.first, coord.second, tileOrigin, requireMarkdown);
 }
 
 // -------- Disk peek: page JSON → outline entries ---------------------------
 
 QVector<LinkOutlineEntry>
-Document::peekPageLinkOutlineFromDisk(int pageIndex) const
+Document::peekPageLinkOutlineFromDisk(int pageIndex, bool requireMarkdown) const
 {
     if (m_bundlePath.isEmpty()) return {};
     if (pageIndex < 0 || pageIndex >= m_pageOrder.size()) return {};
@@ -3689,7 +3691,7 @@ Document::peekPageLinkOutlineFromDisk(int pageIndex) const
 
     return extractLinkOutlineFromJsonObjects(
         jd.object()["objects"].toArray(),
-        pageIndex, /*tileX=*/0, /*tileY=*/0, /*tileOrigin=*/QPointF());
+        pageIndex, /*tileX=*/0, /*tileY=*/0, /*tileOrigin=*/QPointF(), requireMarkdown);
 }
 
 // -------- Cache maintenance -------------------------------------------------
@@ -3759,19 +3761,33 @@ void Document::refreshLinkOutlineFor(TileCoord coord) const
 
 void Document::refreshLinkOutlineFor(int pageIndex) const
 {
-    if (!m_linkOutlineCacheReady) return;
+    // Nothing to do until at least one cache has been built.  Each cache keeps
+    // its own ready flag so the outline (markdown-only) and the SB2 marker
+    // (all-links) caches can be populated independently.
+    if (!m_linkOutlineCacheReady && !m_markerCacheReady) return;
+
     if (pageIndex < 0 || pageIndex >= m_pageOrder.size()) {
-        m_pageOutline.erase(pageIndex);
+        if (m_linkOutlineCacheReady) m_pageOutline.erase(pageIndex);
+        if (m_markerCacheReady)      m_pageMarkers.erase(pageIndex);
         return;
     }
+
+    // Re-extract from the most authoritative source once, then filter per cache
+    // via requireMarkdown.
     const QString uuid = m_pageOrder[pageIndex];
     auto it = m_loadedPages.find(uuid);
-    if (it != m_loadedPages.end() && it->second) {
-        m_pageOutline[pageIndex] = extractLinkOutlineFromPage(
-            it->second.get(), pageIndex, 0, 0, false);
-    } else {
-        m_pageOutline[pageIndex] = peekPageLinkOutlineFromDisk(pageIndex);
-    }
+    const bool loaded = (it != m_loadedPages.end() && it->second);
+
+    auto compute = [&](bool requireMarkdown) -> QVector<LinkOutlineEntry> {
+        if (loaded) {
+            return extractLinkOutlineFromPage(
+                it->second.get(), pageIndex, 0, 0, false, requireMarkdown);
+        }
+        return peekPageLinkOutlineFromDisk(pageIndex, requireMarkdown);
+    };
+
+    if (m_linkOutlineCacheReady) m_pageOutline[pageIndex] = compute(/*requireMarkdown=*/true);
+    if (m_markerCacheReady)      m_pageMarkers[pageIndex] = compute(/*requireMarkdown=*/false);
 }
 
 void Document::dropLinkOutlineFor(TileCoord coord) const
@@ -3781,21 +3797,25 @@ void Document::dropLinkOutlineFor(TileCoord coord) const
 
 void Document::dropLinkOutlineFor(int pageIndex) const
 {
-    m_pageOutline.erase(pageIndex);
-    // Re-key higher pages down by 1 — removePage compacts m_pageOrder so
-    // the caller's notion of "pageIndex i" shifts for i > removed index.
-    // This matches how removePage updates m_pageOrder immediately.
-    std::map<int, QVector<LinkOutlineEntry>> shifted;
-    for (auto& kv : m_pageOutline) {
-        const int newKey = (kv.first > pageIndex) ? (kv.first - 1) : kv.first;
-        // Update pageIndex field inside each entry too.
-        QVector<LinkOutlineEntry> v = std::move(kv.second);
-        if (newKey != kv.first) {
-            for (auto& e : v) e.pageIndex = newKey;
+    // Erase the removed page and re-key higher pages down by 1 — removePage
+    // compacts m_pageOrder so the caller's notion of "pageIndex i" shifts for
+    // i > removed index.  Applied identically to both caches.
+    auto dropAndRekey = [pageIndex](std::map<int, QVector<LinkOutlineEntry>>& map) {
+        map.erase(pageIndex);
+        std::map<int, QVector<LinkOutlineEntry>> shifted;
+        for (auto& kv : map) {
+            const int newKey = (kv.first > pageIndex) ? (kv.first - 1) : kv.first;
+            QVector<LinkOutlineEntry> v = std::move(kv.second);
+            if (newKey != kv.first) {
+                for (auto& e : v) e.pageIndex = newKey;
+            }
+            shifted[newKey] = std::move(v);
         }
-        shifted[newKey] = std::move(v);
-    }
-    m_pageOutline = std::move(shifted);
+        map = std::move(shifted);
+    };
+
+    dropAndRekey(m_pageOutline);
+    if (m_markerCacheReady) dropAndRekey(m_pageMarkers);
 }
 
 void Document::clearLinkOutlineCache() const
@@ -3803,6 +3823,79 @@ void Document::clearLinkOutlineCache() const
     m_pageOutline.clear();
     m_tileOutline.clear();
     m_linkOutlineCacheReady = false;
+    m_pageMarkers.clear();
+    m_markerCacheReady = false;
+}
+
+// -------- SB2 all-links marker cache ---------------------------------------
+
+void Document::buildMarkerCache() const
+{
+    m_pageMarkers.clear();
+
+    // Markers are a paged-mode concept (edgeless has no page track).
+    if (!isEdgeless()) {
+        const int count = static_cast<int>(m_pageOrder.size());
+        for (int i = 0; i < count; ++i) {
+            const QString uuid = m_pageOrder[i];
+            auto it = m_loadedPages.find(uuid);
+            QVector<LinkOutlineEntry> entries;
+            if (it != m_loadedPages.end() && it->second) {
+                entries = extractLinkOutlineFromPage(
+                    it->second.get(), i, 0, 0, false, /*requireMarkdown=*/false);
+            } else {
+                entries = peekPageLinkOutlineFromDisk(i, /*requireMarkdown=*/false);
+            }
+            m_pageMarkers[i] = std::move(entries);
+        }
+    }
+
+    m_markerCacheReady = true;
+}
+
+QVector<Document::PageLinkMarker> Document::pageLinkMarkers() const
+{
+    if (isEdgeless()) return {};
+    if (!m_markerCacheReady) buildMarkerCache();
+
+    // Iterate pages in order. For LOADED pages we extract live from memory so
+    // markers reflect in-session edits (new links, color/description changes,
+    // moves) even if a mutation path forgot to refresh the marker cache -- the
+    // page the user is editing is always the loaded/visible one. UNLOADED pages
+    // fall back to the disk-peek-backed cache (no force-load on scroll).
+    QVector<PageLinkMarker> out;
+    const int count = static_cast<int>(m_pageOrder.size());
+    out.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        QVector<LinkOutlineEntry> live;
+        const QVector<LinkOutlineEntry>* entries = nullptr;
+
+        const QString& uuid = m_pageOrder[i];
+        auto lit = m_loadedPages.find(uuid);
+        if (lit != m_loadedPages.end() && lit->second) {
+            live = extractLinkOutlineFromPage(lit->second.get(), i, 0, 0,
+                                              /*edgeless=*/false, /*requireMarkdown=*/false);
+            entries = &live;
+        } else {
+            auto cit = m_pageMarkers.find(i);
+            if (cit != m_pageMarkers.end()) entries = &cit->second;
+        }
+        if (!entries || entries->isEmpty()) continue;
+
+        // Reduce to the topmost link on the page (smallest local Y).
+        const LinkOutlineEntry* top = &entries->first();
+        for (const LinkOutlineEntry& e : *entries) {
+            if (e.docPos.y() < top->docPos.y()) top = &e;
+        }
+
+        PageLinkMarker m;
+        m.pageIndex   = i;
+        m.localY      = top->docPos.y();
+        m.color       = top->iconColor;   // raw; bar applies min-contrast substitution
+        m.description = top->description;
+        out.push_back(std::move(m));
+    }
+    return out;
 }
 
 // -------- Public query: flat snapshot --------------------------------------

@@ -63,6 +63,18 @@ QColor darkenColorForExport(const QColor& color);
  */
 QColor sourceShade(int slot, bool darkMode);
 
+/**
+ * @brief Saturated theme-tinted accent color for a PDF source group.
+ * @param slot     Zero-based source display slot (see Document::paletteSlotForSource).
+ *                 Negative values return an invalid QColor (no accent).
+ * @param darkMode True for the dark-theme palette.
+ * @return A distinct, legible color for @p slot; cycles when @p slot exceeds
+ *         the palette size. Uses the SAME slot index as sourceShade() so a
+ *         source rendered as "gray shade N" in the outline panel reads as
+ *         "color N" on the enhanced scroll bar (Plan SB2 / Q13.10).
+ */
+QColor sourceAccentColor(int slot, bool darkMode);
+
 } // namespace DarkModeUtils
 
 #endif // DARKMODEUTILS_H

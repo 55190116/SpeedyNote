@@ -195,4 +195,30 @@ QColor sourceShade(int slot, bool darkMode)
     return palette[slot % kCount];
 }
 
+QColor sourceAccentColor(int slot, bool darkMode)
+{
+    if (slot < 0) {
+        return QColor();  // invalid: no accent (single-source / plain pages)
+    }
+
+    // Saturated, well-separated hues sharing the slot index with sourceShade().
+    // Dark-mode variants are a touch lighter/less saturated so they read on the
+    // dark track without glowing. Order: blue, amber, green, violet, then cycle.
+    static const QColor kLight[] = {
+        QColor("#3B82F6"),  // slot 0 (primary): blue
+        QColor("#F59E0B"),  // slot 1: amber
+        QColor("#10B981"),  // slot 2: green
+        QColor("#8B5CF6"),  // slot 3: violet
+    };
+    static const QColor kDark[] = {
+        QColor("#60A5FA"),
+        QColor("#FBBF24"),
+        QColor("#34D399"),
+        QColor("#A78BFA"),
+    };
+    constexpr int kCount = int(sizeof(kLight) / sizeof(kLight[0]));
+    const QColor* palette = darkMode ? kDark : kLight;
+    return palette[slot % kCount];
+}
+
 } // namespace DarkModeUtils

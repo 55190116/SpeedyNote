@@ -8,6 +8,7 @@
 #include "widgets/ViewportScrollBar.h"
 #include "../core/DocumentViewport.h"
 #include "../core/Document.h"
+#include "../core/DarkModeUtils.h"
 
 #include <QStackedWidget>
 #include <QMouseEvent>
@@ -17,6 +18,7 @@
 #include <QTimer>
 #include <QSettings>
 #include <QInputDevice>
+#include <QHash>
 
 // ============================================================================
 // Constructor / Destructor
@@ -609,6 +611,7 @@ void SplitViewManager::destroyScrollBars(Pane pane)
     disconnect(b.cViewToH);
     disconnect(b.cVToView);
     disconnect(b.cHToView);
+    disconnect(b.cMarker);
     if (b.fadeTimer) { b.fadeTimer->stop(); delete b.fadeTimer; }
     delete b.vBar;
     delete b.hBar;
@@ -650,7 +653,8 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     disconnect(b.cViewToH);
     disconnect(b.cVToView);
     disconnect(b.cHToView);
-    b.cViewToV = b.cViewToH = b.cVToView = b.cHToView = QMetaObject::Connection{};
+    disconnect(b.cMarker);
+    b.cViewToV = b.cViewToH = b.cVToView = b.cHToView = b.cMarker = QMetaObject::Connection{};
 
     b.bound = vp;
     if (!vp) return;
@@ -700,9 +704,99 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
         if (pb.bound) pb.bound->setHorizontalScrollFraction(f);
     });
 
+    // SB2: clicking a link marker jumps the bound viewport to that page.
+    b.cMarker = connect(b.vBar, &ViewportScrollBar::markerActivated, this,
+                        [this, pane](int pageIndex) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (pb.bound && pageIndex >= 0) pb.bound->scrollToPage(pageIndex);
+    });
+
+    // SB2: compute the per-source accent + link-marker document map now.
+    updateScrollBarDocumentMap(vp);
+
     // Keep the bars above the (possibly newly shown) viewport.
     b.vBar->raise();
     b.hBar->raise();
+}
+
+void SplitViewManager::updateScrollBarDocumentMap(DocumentViewport* vp)
+{
+    if (!vp) return;
+
+    // Find the pane currently bound to this viewport.
+    int paneIdx = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].bound == vp) { paneIdx = i; break; }
+    }
+    if (paneIdx < 0) return;
+
+    PaneBars& b = m_paneBars[paneIdx];
+    if (!b.vBar) return;
+
+    Document* doc = vp->document();
+    if (!doc) {
+        b.vBar->setAccentRegions({});
+        b.vBar->setMarkers({});
+        return;
+    }
+
+    // --- Per-source accent bands ---------------------------------------
+    // Single-source (or plain) documents get no stripes: parity with SB1.
+    QVector<ViewportScrollBar::AccentRegion> accents;
+    const QStringList order = doc->sourceDisplayOrder();
+    if (order.size() > 1) {
+        // The palette slot IS the index in sourceDisplayOrder(); precompute a
+        // lookup so the per-page loop stays O(pages) instead of calling
+        // paletteSlotForSource() (which rebuilds the order list every call).
+        QHash<QString, int> slotOf;
+        slotOf.reserve(order.size());
+        for (int i = 0; i < order.size(); ++i) slotOf.insert(order[i], i);
+
+        const int pageCount = doc->pageCount();
+        int runStart = -1;
+        int runSlot = -2;  // -2 = no active run
+        auto flushRun = [&](int runEnd) {
+            if (runSlot < 0 || runStart < 0) return;  // plain-page run: no stripe
+            const qreal start = vp->pageTrackFraction(runStart);
+            const qreal end = vp->pageTrackFraction(runEnd + 1);  // bottom of last page
+            if (start >= 0.0 && end > start) {
+                const QColor c = DarkModeUtils::sourceAccentColor(runSlot, m_darkMode);
+                if (c.isValid()) accents.push_back({ start, end, c });
+            }
+        };
+        for (int i = 0; i < pageCount; ++i) {
+            QString srcId;
+            int pdfPage = -1;
+            int slot = -1;  // plain page
+            if (doc->pdfBindingForNotebookPage(i, srcId, pdfPage)) {
+                slot = slotOf.value(srcId, -1);
+            }
+            if (slot != runSlot) {
+                flushRun(i - 1);
+                runSlot = slot;
+                runStart = i;
+            }
+        }
+        flushRun(pageCount - 1);
+    }
+    b.vBar->setAccentRegions(accents);
+
+    // --- Link markers ---------------------------------------------------
+    QVector<ViewportScrollBar::BarMarker> markers;
+    const QVector<Document::PageLinkMarker> pageMarkers = doc->pageLinkMarkers();
+    markers.reserve(pageMarkers.size());
+    for (const Document::PageLinkMarker& pm : pageMarkers) {
+        const qreal frac = vp->pageTrackFraction(pm.pageIndex);
+        if (frac < 0.0) continue;
+        ViewportScrollBar::BarMarker m;
+        m.pos = frac;
+        m.color = pm.color;
+        m.pageIndex = pm.pageIndex;
+        m.kind = ViewportScrollBar::MarkerKind::Link;
+        m.tooltip = pm.description;
+        markers.push_back(std::move(m));
+    }
+    b.vBar->setMarkers(markers);
 }
 
 void SplitViewManager::refreshHandleSizes(Pane pane)
@@ -754,6 +848,8 @@ void SplitViewManager::applyScrollBarDarkMode()
     for (int i = 0; i < 2; ++i) {
         if (m_paneBars[i].vBar) m_paneBars[i].vBar->setDarkMode(m_darkMode);
         if (m_paneBars[i].hBar) m_paneBars[i].hBar->setDarkMode(m_darkMode);
+        // SB2 accent colors are theme-dependent, so recompute the document map.
+        if (m_paneBars[i].bound) updateScrollBarDocumentMap(m_paneBars[i].bound);
     }
 }
 

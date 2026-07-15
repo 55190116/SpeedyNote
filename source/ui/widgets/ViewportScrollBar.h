@@ -19,6 +19,8 @@
 
 #include <QWidget>
 #include <QColor>
+#include <QString>
+#include <QVector>
 
 class ViewportScrollBar : public QWidget {
     Q_OBJECT
@@ -27,6 +29,28 @@ public:
     // Which edge of the host the bar is docked against. Stored for SB4
     // (placement/orientation settings); SB1 paints symmetrically.
     enum class DockEdge { Left, Right, Top, Bottom };
+
+    // SB2 document map -------------------------------------------------------
+    // A marker's kind decides its lane/tooltip semantics. Only Link is produced
+    // by SB2; SearchHit is reserved for SB-search (channel is ready).
+    enum class MarkerKind { Link, SearchHit };
+
+    // A continuous per-source color band along the track, in track fractions
+    // [0..1] (top-of-first-page .. bottom-of-last-page of the run).
+    struct AccentRegion {
+        qreal start = 0.0;
+        qreal end = 0.0;
+        QColor color;
+    };
+
+    // A single tick at a track fraction. pageIndex is the jump target.
+    struct BarMarker {
+        qreal pos = 0.0;
+        QColor color;
+        int pageIndex = -1;
+        MarkerKind kind = MarkerKind::Link;
+        QString tooltip;
+    };
 
     explicit ViewportScrollBar(Qt::Orientation orientation,
                                DockEdge edge,
@@ -46,6 +70,12 @@ public:
     // The fixed thickness of the bar along its minor axis.
     static int barThickness() { return 16; }
 
+    // SB2: document-map content. Both are no-ops on horizontal bars (the map
+    // is a page-axis concept). Stored and repainted; positions are track
+    // fractions already mapped by the controller.
+    void setAccentRegions(const QVector<AccentRegion>& regions);
+    void setMarkers(const QVector<BarMarker>& markers);
+
 public slots:
     // Programmatic position update (from the viewport). Does NOT emit
     // fractionChanged, so it cannot feed back into the viewport.
@@ -57,6 +87,9 @@ public slots:
 signals:
     // Emitted only on user interaction (drag / track paging).
     void fractionChanged(qreal fraction);
+    // Emitted when the user clicks a marker tick (SB2). pageIndex is the
+    // marker's jump target.
+    void markerActivated(int pageIndex);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -74,6 +107,11 @@ private:
     qreal posAlongAxis(const QPointF& p) const;
     void setFractionFromUser(qreal fraction);
 
+    // SB2 helpers.
+    qreal fractionToPx(qreal frac) const;   // track-fraction -> pixel along axis
+    int markerAtPos(qreal pos) const;       // index into m_markers within hit band, or -1
+    QColor legibleMarkerColor(const QColor& raw) const;
+
     QColor trackColor() const;
     QColor handleColor() const;
 
@@ -87,8 +125,13 @@ private:
     bool m_dragging = false;
     bool m_handleHovered = false;
     qreal m_dragGrabOffset = 0.0;  // px between grab point and handle start
+    int m_hoveredMarker = -1;      // SB2: marker index under cursor (tooltip debounce)
+
+    QVector<AccentRegion> m_accents;  // SB2: per-source color bands
+    QVector<BarMarker> m_markers;     // SB2: link/search ticks
 
     static constexpr int kMinHandlePx = 40;
+    static constexpr qreal kMarkerHitBandPx = 6.0;  // half-width of tick hit zone
 };
 
 #endif // VIEWPORTSCROLLBAR_H

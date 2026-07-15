@@ -131,6 +131,16 @@ public:
     void setScrollBarsPinned(bool pinned);
     bool scrollBarsPinned() const { return m_scrollBarsPinned; }
 
+    /**
+     * @brief Recompute the SB2 document map (per-source accents + link markers)
+     *        for whichever pane is bound to @p vp and push it to that pane's
+     *        vertical bar.
+     *
+     * Cheap and idempotent; safe to call on any structure/link/theme change.
+     * A null @p vp or a vp not currently bound to a pane is a no-op.
+     */
+    void updateScrollBarDocumentMap(DocumentViewport* vp);
+
 signals:
     void activeViewportChanged(DocumentViewport* viewport);
     void activePaneChanged(Pane pane);
@@ -172,6 +182,7 @@ private:
         QMetaObject::Connection cViewToH;
         QMetaObject::Connection cVToView;
         QMetaObject::Connection cHToView;
+        QMetaObject::Connection cMarker;   // SB2: vBar markerActivated -> scrollToPage
     };
 
     QStackedWidget* stackForPane(Pane pane) const;

@@ -2919,6 +2919,10 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
             if (markdownNotesSidebar && markdownNotesSidebar->isVisible()) {
                 refreshNotesOutline();
             }
+            // SB2: link add/remove/move/undo/redo changes the scroll-bar markers.
+            if (m_splitViewManager) {
+                m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
+            }
         });
 
         // OCR: Restart debounce timer when strokes change
@@ -3454,6 +3458,12 @@ void MainWindow::showPdfExportDialog()
 
 void MainWindow::updateOutlinePanelForDocument(Document* doc)
 {
+    // SB2: the scroll-bar document map (per-source accents + link markers)
+    // depends on the same source registry / structure this refresh reflects.
+    if (m_splitViewManager) {
+        m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
+    }
+
     if (!m_leftSidebar) {
         return;
     }
@@ -3621,6 +3631,11 @@ void MainWindow::notifyPageStructureChanged(Document* doc, int currentPage)
         if (currentPage >= 0) {
             m_pagePanelActionBar->setCurrentPage(currentPage);
         }
+    }
+
+    // SB2: page add/remove/reorder shifts accent runs and marker positions.
+    if (m_splitViewManager) {
+        m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
     }
 }
 
@@ -4388,6 +4403,13 @@ void MainWindow::refreshDestinationAfterImport(DocumentViewport* destVp, int des
     // shared page panel (bound to the active document).
     if (destVp == currentViewport()) {
         notifyPageStructureChanged(destDoc, destVp->currentPageIndex());
+    }
+
+    // SB2: an import can add a PDF source and pages, changing accents/markers.
+    // Target destVp explicitly so the map refreshes even when the destination
+    // lives in the inactive pane.
+    if (m_splitViewManager) {
+        m_splitViewManager->updateScrollBarDocumentMap(destVp);
     }
 }
 
@@ -5575,7 +5597,12 @@ void MainWindow::connectSubToolbarSignals()
             Page* page = doc->page(vp->currentPageIndex());
             if (page) {
                 int pageIndex = doc->pageIndexByUuid(page->uuid);
-                if (pageIndex >= 0) doc->markPageDirty(pageIndex);
+                if (pageIndex >= 0) {
+                    doc->markPageDirty(pageIndex);
+                    // SB2: keep the marker cache in sync so the tick color
+                    // updates even after this page is later evicted.
+                    doc->refreshLinkOutlineFor(pageIndex);
+                }
             }
         }
         vp->update();
@@ -5584,6 +5611,8 @@ void MainWindow::connectSubToolbarSignals()
             // no collapse of expanded subtrees, no focus loss).
             markdownNotesSidebar->updateLinkObject(link->id, link->description, color);
         }
+        // SB2: recompute the scroll-bar document map (tick color changed).
+        if (m_splitViewManager) m_splitViewManager->updateScrollBarDocumentMap(vp);
     });
 
     // LinkObject description
@@ -5600,13 +5629,19 @@ void MainWindow::connectSubToolbarSignals()
             Page* page = doc->page(vp->currentPageIndex());
             if (page) {
                 int pageIndex = doc->pageIndexByUuid(page->uuid);
-                if (pageIndex >= 0) doc->markPageDirty(pageIndex);
+                if (pageIndex >= 0) {
+                    doc->markPageDirty(pageIndex);
+                    // SB2: keep the marker cache in sync (tooltip text changed).
+                    doc->refreshLinkOutlineFor(pageIndex);
+                }
             }
         }
         vp->update();
         if (markdownNotesSidebar && markdownNotesSidebar->isVisible()) {
             markdownNotesSidebar->updateLinkObject(link->id, description, link->iconColor);
         }
+        // SB2: recompute the scroll-bar document map (marker tooltip changed).
+        if (m_splitViewManager) m_splitViewManager->updateScrollBarDocumentMap(vp);
     });
 
     // Tab changes: per-tab state management via Toolbar (keyed by unique tab IDs).

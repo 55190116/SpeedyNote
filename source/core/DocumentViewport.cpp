@@ -1659,6 +1659,35 @@ QSizeF DocumentViewport::totalContentSize() const
     return m_cachedContentSize;
 }
 
+qreal DocumentViewport::pageTrackFraction(int pageIndex) const
+{
+    // SB2: normalized top-of-page position in the scroll bar's track space.
+    if (!m_document || m_document->isEdgeless()) {
+        return -1.0;
+    }
+    const int count = m_document->pageCount();
+    if (count <= 0) {
+        return -1.0;
+    }
+
+    ensurePageLayoutCache();
+    const qreal contentHeight = m_cachedContentSize.height();
+    if (contentHeight <= 0.0) {
+        return -1.0;
+    }
+
+    if (pageIndex <= 0) {
+        return 0.0;
+    }
+    if (pageIndex >= count) {
+        return 1.0;  // bottom of the last page
+    }
+    if (pageIndex >= m_pageYCache.size()) {
+        return 1.0;  // defensive: cache smaller than expected
+    }
+    return qBound(0.0, m_pageYCache[pageIndex] / contentHeight, 1.0);
+}
+
 int DocumentViewport::pageAtPoint(QPointF documentPt) const
 {
     if (!m_document || m_document->pageCount() == 0) {
@@ -7675,6 +7704,11 @@ void DocumentViewport::createLinkObjectForHighlight(int pageIndex)
 
     pushObjectInsertUndo(rawPtr, pageIndex, {});
 
+    // SB2: a highlight-created LinkObject adds a scroll-bar marker; keep the
+    // outline cache current and notify listeners (scroll bar + notes sidebar).
+    m_document->refreshLinkOutlineFor(pageIndex);
+    emit linkObjectListMayHaveChanged();
+
 #ifdef QT_DEBUG
     qDebug() << "Created LinkObject for highlight on page" << pageIndex
              << "description:" << rawPtr->description.left(30);
@@ -7756,6 +7790,10 @@ void DocumentViewport::createLinkObjectAtPosition(int pageIndex, const QPointF& 
     }
     
     emit documentModified();
+    // SB2: a brand-new LinkObject adds a scroll-bar marker. Refresh the outline
+    // cache for the owning container and notify listeners (scroll bar + notes).
+    markLinkContainerDirtyAndRefreshOutline(rawPtr);
+    emit linkObjectListMayHaveChanged();
     update();
     
 #ifdef SPEEDYNOTE_DEBUG
