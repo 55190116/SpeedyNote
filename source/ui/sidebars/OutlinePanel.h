@@ -57,8 +57,22 @@ public:
      * 
      * Clears any existing outline and populates the tree with new data.
      * Applies default expansion state from PDF or first-level expansion.
+     *
+     * @param unavailablePages PDF target pages that are no longer present in the
+     *        notebook (Plan A2). Entries pointing at these pages are rendered
+     *        greyed and are inert (clicking does nothing).
      */
-    void setOutline(const QVector<PdfOutlineItem>& outline);
+    void setOutline(const QVector<PdfOutlineItem>& outline,
+                    const QSet<int>& unavailablePages = {});
+
+    /**
+     * @brief Refresh which entries are greyed/inert without rebuilding the tree.
+     * @param unavailablePages PDF target pages no longer present in the notebook.
+     *
+     * Preserves expansion/selection state. Call after a page delete/undo/reorder
+     * changes which PDF pages are present.
+     */
+    void updateAvailability(const QSet<int>& unavailablePages);
 
     /**
      * @brief Clear the outline display.
@@ -141,6 +155,7 @@ private:
 
     // State per document (session only)
     QSet<QString> m_expandedItems;      // Track expanded items by path
+    QSet<int> m_unavailablePages;       // Plan A2: PDF target pages absent from notebook
     int m_lastHighlightedPage = -1;
     bool m_darkMode = false;
 
@@ -148,5 +163,6 @@ private:
     static constexpr int PageRole = Qt::UserRole;
     static constexpr int PositionXRole = Qt::UserRole + 1;
     static constexpr int PositionYRole = Qt::UserRole + 2;
+    static constexpr int UnavailableRole = Qt::UserRole + 3;  // Plan A2: greyed/inert entry
 };
 

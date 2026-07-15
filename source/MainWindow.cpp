@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include <functional>               // Plan A2: std::function for outline walk
 #include "core/DocumentViewport.h"  // Phase 3.1: New viewport architecture
 #include "core/Document.h"          // Phase 3.1: Document class
 #include "core/Page.h"              // Phase P.4.6: For thumbnail rendering
@@ -2506,6 +2507,10 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         disconnect(m_pagePanelActionBarConn);
         m_pagePanelActionBarConn = {};
     }
+    if (m_pageStructureUndoConn) {
+        disconnect(m_pageStructureUndoConn);
+        m_pageStructureUndoConn = {};
+    }
     // BUG FIX: Disconnect documentModified connection
     if (m_documentModifiedConn) {
         disconnect(m_documentModifiedConn);
@@ -2923,6 +2928,38 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         });
     }
     
+    // Plan A2: React to undo/redo of a page delete (page structure changed).
+    // Refresh the page panel, navigate to the focused page, and mark modified.
+    m_pageStructureUndoConn = connect(viewport, &DocumentViewport::pageStructureChangedByUndo,
+                                      this, [this, viewport](int focusPageIndex) {
+        if (!viewport) return;
+        Document* doc = viewport->document();
+        if (!doc) return;
+
+        viewport->notifyDocumentStructureChanged();
+
+        int newPage = qBound(0, focusPageIndex, doc->pageCount() - 1);
+        viewport->scrollToPage(newPage);
+
+        // Refresh page panel + action bar.
+        notifyPageStructureChanged(doc, newPage);
+
+        // Re-grey outline entries whose PDF target may now be present/absent.
+        refreshOutlineAvailability(doc);
+
+        // Mark the owning tab modified.
+        if (m_splitViewManager) {
+            m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+                for (int i = 0; i < tm->tabCount(); ++i) {
+                    if (tm->viewportAt(i) == viewport) {
+                        tm->markTabModified(i, true);
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
     // Page Panel: Task 5.3: Sync PagePanelActionBar with viewport
     if (m_pagePanelActionBar) {
         // Connect viewport's currentPageChanged to PagePanelActionBar (tracked connection)
@@ -3552,12 +3589,55 @@ void MainWindow::updateOutlinePanelForDocument(Document* doc)
     
     // Case 3: PDF with outline - show tab and load data
     QVector<PdfOutlineItem> outline = pdf->outline();
-    outlinePanel->setOutline(outline);
+    outlinePanel->setOutline(outline, computeUnavailableOutlinePages(doc));
     m_leftSidebar->showOutlineTab(true);
     
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "Phase E.2: Loaded outline with" << outline.size() << "top-level items";
 #endif
+}
+
+QSet<int> MainWindow::computeUnavailableOutlinePages(Document* doc) const
+{
+    // Plan A2: an outline entry is "unavailable" (greyed/inert) when its target
+    // PDF page is no longer present in the notebook (deleted). Only primary-source
+    // PDF pages participate in outline navigation, so notebookPageIndexForPdfPage
+    // returning -1 means the page is gone.
+    QSet<int> unavailable;
+    if (!doc || !doc->isPdfLoaded()) {
+        return unavailable;
+    }
+    const PdfProvider* pdf = doc->pdfProvider();
+    if (!pdf || !pdf->hasOutline()) {
+        return unavailable;
+    }
+
+    std::function<void(const QVector<PdfOutlineItem>&)> walk =
+        [&](const QVector<PdfOutlineItem>& items) {
+            for (const PdfOutlineItem& item : items) {
+                if (item.targetPage >= 0 &&
+                    doc->notebookPageIndexForPdfPage(item.targetPage) < 0) {
+                    unavailable.insert(item.targetPage);
+                }
+                if (!item.children.isEmpty()) {
+                    walk(item.children);
+                }
+            }
+        };
+    walk(pdf->outline());
+    return unavailable;
+}
+
+void MainWindow::refreshOutlineAvailability(Document* doc)
+{
+    if (!m_leftSidebar) {
+        return;
+    }
+    OutlinePanel* outlinePanel = m_leftSidebar->outlinePanel();
+    if (!outlinePanel || !outlinePanel->hasOutline()) {
+        return;
+    }
+    outlinePanel->updateAvailability(computeUnavailableOutlinePages(doc));
 }
 
 // ============================================================================
@@ -4137,18 +4217,12 @@ void MainWindow::deletePageInDocument()
         return;
     }
     
-    // Guard 2: Cannot delete PDF pages
-    if (page->backgroundType == Page::BackgroundType::PDF) {
-        QMessageBox::information(this, tr("Cannot Delete"),
-            tr("Cannot delete PDF pages. Use an external tool to modify the PDF."));
-        return;
-            }
-    
-    // Clear undo/redo for pages >= currentPageIndex (they're shifting or being deleted)
-    viewport->clearUndoStacksFrom(currentPageIndex);
-    
-    // Delete the page
-    if (!doc->removePage(currentPageIndex)) {
+    // Plan A2: PDF pages can now be deleted (undo-only safety net; one Ctrl+Z
+    // restores the page). The single-PDF-era guard has been removed.
+    (void)page;
+
+    // Delete the page through the viewport so the deletion is undoable.
+    if (!viewport->deletePagesWithUndo({currentPageIndex})) {
 #ifdef SPEEDYNOTE_DEBUG
         qDebug() << "deletePageInDocument: Failed to delete page" << currentPageIndex;
 #endif
@@ -4175,6 +4249,9 @@ void MainWindow::deletePageInDocument()
     
     // Update PagePanel and action bar
     notifyPageStructureChanged(doc, newPage);
+
+    // Re-grey any outline entries whose PDF target page was just deleted.
+    refreshOutlineAvailability(doc);
 }
 
 void MainWindow::openPdfDocument(const QString &filePath)
@@ -7195,16 +7272,7 @@ void MainWindow::setupPagePanelActionBar()
                 
                 int pageIndex = vp->currentPageIndex();
                 
-                // BUG-PG-001 FIX: Can't delete PDF background pages
-                Page* page = doc->page(pageIndex);
-                if (page && page->backgroundType == Page::BackgroundType::PDF) {
-#ifdef SPEEDYNOTE_DEBUG
-                    qDebug() << "Page Panel: Cannot delete PDF page" << pageIndex;
-#endif
-                    m_pagePanelActionBar->resetDeleteButton();
-                    return;
-                }
-                
+                // Plan A2: PDF pages can now be deleted (undo-only safety net).
                 // Store page index for deferred deletion
                 // Actual deletion happens in deleteConfirmed handler
                 m_pendingDeletePageIndex = pageIndex;
@@ -7242,16 +7310,8 @@ void MainWindow::setupPagePanelActionBar()
             return;
         }
         
-        // Double-check PDF protection (page may have changed)
-        Page* page = doc->page(m_pendingDeletePageIndex);
-        if (page && page->backgroundType == Page::BackgroundType::PDF) {
-#ifdef SPEEDYNOTE_DEBUG
-            qDebug() << "Page Panel: Cannot delete PDF page" << m_pendingDeletePageIndex;
-#endif
-            m_pendingDeletePageIndex = -1;
-            return;
-        }
-        
+        // Plan A2: PDF pages can now be deleted (undo-only safety net).
+
         // Can't delete the last page
         if (doc->pageCount() <= 1) {
 #ifdef SPEEDYNOTE_DEBUG
@@ -7261,9 +7321,9 @@ void MainWindow::setupPagePanelActionBar()
             return;
         }
                 
-                // Actually delete the page
+                // Actually delete the page (undoable via Ctrl+Z)
         int deleteIndex = m_pendingDeletePageIndex;
-        if (doc->removePage(deleteIndex)) {
+        if (vp->deletePagesWithUndo({deleteIndex})) {
 #ifdef SPEEDYNOTE_DEBUG
             qDebug() << "Page Panel: Page" << deleteIndex << "permanently deleted";
 #endif
@@ -7275,6 +7335,9 @@ void MainWindow::setupPagePanelActionBar()
             
             // Update UI
             notifyPageStructureChanged(doc, newPage);
+
+            // Re-grey any outline entries whose PDF target page was just deleted.
+            refreshOutlineAvailability(doc);
             
             // Mark tab as modified (page deleted)
             int tabIndex = tabManager()->currentIndex();
@@ -7445,6 +7508,10 @@ void MainWindow::setupPagePanelConnections()
                     if (m_pagePanel) {
                         m_pagePanel->invalidateAllThumbnails();
                     }
+
+                    // Outline targets are position-independent, but recompute
+                    // greying defensively after any structure change (Plan A2).
+                    refreshOutlineAvailability(doc);
                     
                     // Mark tab as modified (page order changed)
                     int tabIndex = tabManager()->currentIndex();

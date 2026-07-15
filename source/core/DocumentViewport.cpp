@@ -12648,6 +12648,64 @@ void DocumentViewport::clearUndoStacksFrom(int pageIndex)
     m_ocrDirtyPages.erase(m_ocrDirtyPages.lower_bound(pageIndex), m_ocrDirtyPages.end());
 }
 
+bool DocumentViewport::deletePagesWithUndo(const QList<int>& indices)
+{
+    if (!m_document || indices.isEmpty()) {
+        return false;
+    }
+
+    // Collect valid, unique indices.
+    QList<int> targets;
+    for (int i : indices) {
+        if (i >= 0 && i < m_document->pageCount() && !targets.contains(i)) {
+            targets.append(i);
+        }
+    }
+    if (targets.isEmpty()) {
+        return false;
+    }
+
+    // Respect the document's minimum-page guard: never delete every page.
+    if (targets.size() >= m_document->pageCount()) {
+        return false;
+    }
+
+    // Remove in descending index order so earlier removals don't shift the
+    // indices of pages we have yet to remove.
+    std::sort(targets.begin(), targets.end(), [](int a, int b) { return a > b; });
+    const int minIndex = targets.last();  // smallest index (sorted descending)
+
+    UndoAction action;
+    action.type = UndoAction::PageDelete;
+
+    for (int idx : targets) {
+        Page* page = m_document->page(idx);  // ensures the page is loaded
+        if (!page) {
+            continue;
+        }
+        UndoAction::DeletedPageSnapshot snap;
+        snap.index = idx;
+        snap.pageJson = page->toJson();
+        if (m_document->removePage(idx)) {
+            action.deletedPages.append(snap);
+        }
+    }
+
+    if (action.deletedPages.isEmpty()) {
+        return false;
+    }
+
+    action.focusPageIndex = qBound(0, minIndex, m_document->pageCount() - 1);
+
+    // Drop now-stale stroke/object undo history for shifted pages, then push the
+    // grouped PageDelete on top so one Ctrl+Z restores the whole set. Pushing
+    // AFTER the purge prevents the action from clearing itself.
+    clearUndoStacksFrom(minIndex);
+    pushUndoAction(action);
+
+    return true;
+}
+
 // ============================================================================
 // Layer Management (Phase 5)
 // ============================================================================
@@ -12781,6 +12839,23 @@ void DocumentViewport::undo()
     if (m_undoStack.isEmpty() || !m_document) return;
 
     UndoAction action = m_undoStack.pop();
+
+    if (action.type == UndoAction::PageDelete) {
+        // Restore removed pages in ascending index order (Plan A2).
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index < b.index; });
+        for (const auto& snap : snaps) {
+            m_document->restorePageFromSnapshot(snap.index, snap.pageJson);
+        }
+        m_redoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        int focus = snaps.isEmpty() ? action.focusPageIndex : snaps.first().index;
+        emit pageStructureChangedByUndo(qBound(0, focus, m_document->pageCount() - 1));
+        return;
+    }
 
     bool isObjectAction = (action.type == UndoAction::ObjectInsert ||
                            action.type == UndoAction::ObjectDelete ||
@@ -13069,6 +13144,22 @@ void DocumentViewport::redo()
     if (m_redoStack.isEmpty() || !m_document) return;
 
     UndoAction action = m_redoStack.pop();
+
+    if (action.type == UndoAction::PageDelete) {
+        // Re-remove pages in descending index order (Plan A2).
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index > b.index; });
+        for (const auto& snap : snaps) {
+            m_document->removePage(snap.index);
+        }
+        m_undoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        emit pageStructureChangedByUndo(qBound(0, action.focusPageIndex, m_document->pageCount() - 1));
+        return;
+    }
 
     bool isObjectAction = (action.type == UndoAction::ObjectInsert ||
                            action.type == UndoAction::ObjectDelete ||

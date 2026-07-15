@@ -300,6 +300,32 @@ QStringList Document::unreferencedSourceIds() const
     return result;
 }
 
+int Document::pruneUnreferencedSources()
+{
+    const QStringList stale = unreferencedSourceIds();
+    if (stale.isEmpty()) {
+        return 0;
+    }
+
+    QSet<QString> staleSet(stale.begin(), stale.end());
+
+    // Close cached providers for the sources being removed.
+    for (const QString& id : stale) {
+        m_pdfProviders.erase(id);
+    }
+
+    // Erase the sources from the registry. toJson() will re-derive the legacy
+    // pdf_path mirror from whatever primary survives (or write an empty path
+    // when the registry becomes empty).
+    m_pdfSources.erase(
+        std::remove_if(m_pdfSources.begin(), m_pdfSources.end(),
+                       [&staleSet](const PdfSource& s) { return staleSet.contains(s.id); }),
+        m_pdfSources.end());
+
+    markModified();
+    return stale.size();
+}
+
 QString Document::computePdfHash(const QString& path)
 {
     QFile file(path);
@@ -1112,6 +1138,67 @@ bool Document::removePage(int index)
     // Outline cache: drop the page's contribution and renumber subsequent
     // entries down by 1 (dropLinkOutlineFor does both).
     dropLinkOutlineFor(index);
+
+    markModified();
+    return true;
+}
+
+bool Document::restorePageFromSnapshot(int index, const QJsonObject& pageJson)
+{
+    // Allow reinserting at the end (index == size).
+    if (index < 0 || index > static_cast<int>(m_pageOrder.size())) {
+        return false;
+    }
+
+    auto page = Page::fromJson(pageJson);
+    if (!page) {
+        return false;
+    }
+
+    const QString uuid = page->uuid;
+
+    // Reinsert into page order at the requested position.
+    m_pageOrder.insert(index, uuid);
+
+    // Restore metadata + PDF-source mappings from the page's own fields.
+    m_pageMetadata[uuid] = page->size;
+    if (page->pdfPageNumber >= 0) {
+        m_pagePdfIndex[uuid] = page->pdfPageNumber;
+        if (!page->pdfSourceId.isEmpty()) {
+            m_pagePdfSource[uuid] = page->pdfSourceId;
+        }
+    }
+
+    // Cancel any pending on-disk deletion scheduled by removePage().
+    m_deletedPages.erase(uuid);
+
+    // Load images from the bundle. Unsaved images survive via the base64
+    // fallback embedded in Page::toJson().
+    if (!m_bundlePath.isEmpty()) {
+        page->loadImages(m_bundlePath);
+    }
+
+    // Store the live page and mark it dirty so it re-persists on save.
+    m_loadedPages[uuid] = std::move(page);
+    m_dirtyPages.insert(uuid);
+
+    invalidateUuidCache();
+
+    // Outline cache: open a slot at `index` (shift entries >= index up by one,
+    // mirroring insertPage()), then repopulate the restored page's own links.
+    if (m_linkOutlineCacheReady) {
+        std::map<int, QVector<LinkOutlineEntry>> shifted;
+        for (auto& kv : m_pageOutline) {
+            const int newKey = (kv.first >= index) ? (kv.first + 1) : kv.first;
+            QVector<LinkOutlineEntry> v = std::move(kv.second);
+            if (newKey != kv.first) {
+                for (auto& e : v) e.pageIndex = newKey;
+            }
+            shifted[newKey] = std::move(v);
+        }
+        m_pageOutline = std::move(shifted);
+        refreshLinkOutlineFor(index);
+    }
 
     markModified();
     return true;
@@ -2944,6 +3031,12 @@ bool Document::saveBundle(const QString& path)
     // - Here we finally have a bundle path, so we can save images and set imagePath
     // - Then the serialized page JSON will have the correct imagePath reference
     saveUnsavedImages(path);
+
+    // Plan A2 / Q7.2: drop any PDF source no page references anymore (e.g. after
+    // deleting all pages backed by an imported source, or every primary-PDF page).
+    // Done before the relative-path refresh and toJson() below so the serialized
+    // pdf_sources[] and legacy pdf_path mirror reflect only live sources.
+    pruneUnreferencedSources();
     
     // Refresh each PDF source's relative path against the bundle location so the
     // serialized pdf_sources[]/pdf_relative_path reflect the current save target.

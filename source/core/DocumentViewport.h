@@ -64,11 +64,31 @@ struct UndoAction {
         ObjectAffinityChange,
         ObjectResize,
         ObjectTextEdit,
-        OcrLockChange
+        OcrLockChange,
+
+        // ===== Page-structure types (Plan A2) =====
+        PageDelete              ///< One or more whole pages removed; undo restores them
     };
 
     Type type = AddStroke;
     int layerIndex = 0;
+
+    /**
+     * @brief Snapshot of a deleted page for PageDelete undo (Plan A2).
+     *
+     * Stores the page's serialized JSON (via Page::toJson, which captures
+     * background, pdfSourceId, layers, objects, bookmarks; images embed a
+     * base64 fallback) plus the notebook index it occupied. Restored in
+     * ascending index order on undo, re-removed in descending order on redo.
+     */
+    struct DeletedPageSnapshot {
+        int index = -1;         ///< Notebook page index the page occupied
+        QJsonObject pageJson;   ///< Page::toJson() snapshot
+    };
+
+    // PageDelete payload (grouped: a batch delete pushes one action)
+    QVector<DeletedPageSnapshot> deletedPages;
+    int focusPageIndex = 0;     ///< Page to focus after undo/redo of a PageDelete
 
     /**
      * @brief A stroke segment residing in a single container (page or tile).
@@ -675,6 +695,21 @@ public:
      * @param pageIndex First page index to clear (inclusive)
      */
     void clearUndoStacksFrom(int pageIndex);
+
+    /**
+     * @brief Delete one or more pages as a single undoable action (Plan A2).
+     *
+     * Snapshots each page (Page::toJson), removes them from the document, drops
+     * now-stale stroke/object undo history for shifted pages, and pushes one
+     * grouped PageDelete undo action so a single Ctrl+Z restores the whole set.
+     *
+     * The document's last-page guard is respected: the call fails (returns
+     * false, deleting nothing) if it would leave the document with zero pages.
+     *
+     * @param indices Notebook page indices to delete (order-independent).
+     * @return True if at least one page was deleted.
+     */
+    bool deletePagesWithUndo(const QList<int>& indices);
     
     // ===== Object Undo Helpers =====
     
@@ -1773,6 +1808,16 @@ signals:
      * @param available True if redo is now available.
      */
     void redoAvailableChanged(bool available);
+
+    /**
+     * @brief Emitted when undo/redo of a PageDelete changed the page structure (Plan A2).
+     *
+     * MainWindow reacts by refreshing the page panel, navigating to
+     * @p focusPageIndex, and marking the tab modified.
+     *
+     * @param focusPageIndex Page index to scroll to after the change.
+     */
+    void pageStructureChangedByUndo(int focusPageIndex);
     
     /**
      * @brief Emitted when the object selection changes.

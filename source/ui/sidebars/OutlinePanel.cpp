@@ -68,9 +68,11 @@ void OutlinePanel::setupUi()
 // Outline Data
 // ============================================================================
 
-void OutlinePanel::setOutline(const QVector<PdfOutlineItem>& outline)
+void OutlinePanel::setOutline(const QVector<PdfOutlineItem>& outline,
+                              const QSet<int>& unavailablePages)
 {
     m_outline = outline;
+    m_unavailablePages = unavailablePages;
     m_tree->clear();
     m_lastHighlightedPage = -1;
     
@@ -84,6 +86,25 @@ void OutlinePanel::setOutline(const QVector<PdfOutlineItem>& outline)
 
     // Populate tree (applyDefaultExpansion sets initial expansion state)
     populateTree(outline, nullptr);
+}
+
+void OutlinePanel::updateAvailability(const QSet<int>& unavailablePages)
+{
+    if (m_unavailablePages == unavailablePages) {
+        return;
+    }
+    m_unavailablePages = unavailablePages;
+
+    // Refresh the flag on every existing item without rebuilding the tree
+    // (preserves expansion + selection state).
+    QTreeWidgetItemIterator it(m_tree);
+    while (*it) {
+        QTreeWidgetItem* item = *it;
+        const int page = item->data(0, PageRole).toInt();
+        item->setData(0, UnavailableRole, m_unavailablePages.contains(page));
+        ++it;
+    }
+    m_tree->viewport()->update();
 }
 
 void OutlinePanel::clearOutline()
@@ -113,6 +134,9 @@ void OutlinePanel::populateTree(const QVector<PdfOutlineItem>& items, QTreeWidge
         treeItem->setData(0, PageRole, item.targetPage);
         treeItem->setData(0, PositionXRole, item.targetPosition.x());
         treeItem->setData(0, PositionYRole, item.targetPosition.y());
+
+        // Plan A2: mark entries whose target PDF page is absent from the notebook.
+        treeItem->setData(0, UnavailableRole, m_unavailablePages.contains(item.targetPage));
 
         // Apply default expansion from PDF
         applyDefaultExpansion(treeItem, item);
@@ -218,6 +242,11 @@ void OutlinePanel::onItemClicked(QTreeWidgetItem* item, int column)
 
     int pageIndex = item->data(0, PageRole).toInt();
     if (pageIndex < 0) {
+        return;
+    }
+
+    // Plan A2: entries whose target page is no longer in the notebook are inert.
+    if (item->data(0, UnavailableRole).toBool()) {
         return;
     }
 

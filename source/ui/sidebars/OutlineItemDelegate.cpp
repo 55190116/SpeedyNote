@@ -41,6 +41,7 @@ void OutlineItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
     QString title = index.data(Qt::DisplayRole).toString();
     int pageNumber = index.data(PageRole).toInt();
     bool hasPage = pageNumber >= 0;
+    bool isUnavailable = index.data(UnavailableRole).toBool();  // Plan A2
 
     // Determine colors based on state and theme
     QColor bgColor;
@@ -76,6 +77,13 @@ void OutlineItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         } else {
             bgColor = QColor("#F5F5F5");
         }
+    }
+
+    // Plan A2: entries whose target page is no longer present in the notebook
+    // are dimmed (and made inert in OutlinePanel::onItemClicked).
+    if (isUnavailable) {
+        textColor = m_darkMode ? QColor("#666666") : QColor("#B0B0B0");
+        pageColor = textColor;
     }
 
     // 1. Draw background

@@ -1130,6 +1130,18 @@ public:
      * registry API is complete.
      */
     QStringList unreferencedSourceIds() const;
+
+    /**
+     * @brief Drop PDF sources no page references anymore (Plan A2 / Q7.2).
+     * @return Number of sources removed.
+     *
+     * Removes each source returned by unreferencedSourceIds() from the registry
+     * and closes its cached provider. When the primary becomes unreferenced and
+     * is dropped, the legacy top-level pdf_path/pdf_hash/pdf_size mirror clears
+     * automatically on the next toJson() (it mirrors the surviving primary, or
+     * writes an empty path when no source remains). Called during saveBundle().
+     */
+    int pruneUnreferencedSources();
     
     /**
      * @brief Find the notebook page index for a given PDF page.
@@ -1365,6 +1377,19 @@ public:
      * Marks the document as modified.
      */
     bool removePage(int index);
+
+    /**
+     * @brief Restore a previously-removed page from a JSON snapshot (Plan A2).
+     * @param index Notebook index at which to reinsert the page.
+     * @param pageJson A Page::toJson() snapshot captured before removal.
+     * @return True if the page was restored.
+     *
+     * Rebuilds the page via Page::fromJson, reinserts its UUID into page_order
+     * at @p index, restores metadata and PDF-source mappings from the page's
+     * own fields, cancels any pending on-disk deletion, loads its images, and
+     * marks the document modified. Used to undo removePage().
+     */
+    bool restorePageFromSnapshot(int index, const QJsonObject& pageJson);
     
     /**
      * @brief Move a page from one position to another.

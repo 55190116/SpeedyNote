@@ -50,6 +50,7 @@ private:
 
     // Custom data roles (must match OutlinePanel)
     static constexpr int PageRole = Qt::UserRole;
+    static constexpr int UnavailableRole = Qt::UserRole + 3;  // Plan A2: greyed/inert entry
 
     bool m_darkMode = false;
 };
