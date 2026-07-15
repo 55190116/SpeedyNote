@@ -408,6 +408,14 @@ private slots:
     // Plan D1: copy the given selected pages (0-based indices in the active
     // document) into another open document chosen via a dialog.
     void copyPagesToOtherDocument(const QList<int>& srcRows);
+
+    // Plan D2: cross-document page-transfer drag-and-drop.
+    // Connect a viewport's pageTransferDropped signal (idempotent).
+    void connectViewportTransferSignal(DocumentViewport* vp);
+    // Handle a drop: resolve srcToken -> live Document, copy + refresh.
+    void handlePageTransferDrop(const QString& srcToken, const QStringList& srcUuids, int destIndex);
+    // Shared post-import refresh of a (possibly non-active) destination viewport.
+    void refreshDestinationAfterImport(DocumentViewport* destVp, int destIndex);
     void openPdfDocument(const QString &filePath = QString());       // doc-1.4: Open PDF file (Ctrl+Shift+O)
     bool isDarkMode();
 

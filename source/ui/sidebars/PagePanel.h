@@ -251,6 +251,7 @@ private slots:
     void performPendingInvalidation();
     void onDragRequested(const QModelIndex& index);
     void onSelectionChanged();
+    void startSelectionDrag();
 
 private:
     void setupUI();
@@ -261,6 +262,8 @@ private:
     QList<int> selectedRows() const;
     void updateSelectionHeader();
     void openRangeDialog();
+    // Plan D2: build a drag pixmap (first thumbnail + count badge).
+    QPixmap makeSelectionDragPixmap(const QList<int>& rows) const;
     void updateThumbnailWidth();
     void applyTheme();
 

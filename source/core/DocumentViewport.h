@@ -158,6 +158,7 @@ struct UndoAction {
 #include <QPointF>
 #include <QSizeF>
 #include <QRectF>
+#include <QLineF>
 #include <QVector>
 #include <QColor>
 #include <QElapsedTimer>
@@ -172,6 +173,10 @@ class QResizeEvent;
 class QMouseEvent;
 class QTabletEvent;
 class QWheelEvent;
+class QDragEnterEvent;
+class QDragMoveEvent;
+class QDragLeaveEvent;
+class QDropEvent;
 class TouchGestureHandler;
 class MissingPdfBanner;
 class LinkObject;
@@ -1838,6 +1843,20 @@ signals:
      * @param focusPageIndex Page index to scroll to after the change.
      */
     void pageStructureChangedByUndo(int focusPageIndex);
+
+    /**
+     * @brief Emitted when a cross-document page-transfer drag is dropped onto
+     *        this viewport (Plan D2).
+     *
+     * MainWindow resolves @p srcToken to the live source Document (by
+     * Document::sessionId()), then copies @p srcUuids into this viewport's
+     * document at @p destIndex via importPagesWithUndo, and refreshes.
+     *
+     * @param srcToken  Source document's sessionId() from the drag payload.
+     * @param srcUuids  Source page UUIDs to copy.
+     * @param destIndex 0-based insertion index in this document.
+     */
+    void pageTransferDropped(const QString& srcToken, const QStringList& srcUuids, int destIndex);
     
     /**
      * @brief Emitted when the object selection changes.
@@ -1993,6 +2012,12 @@ protected:
 #endif
     void leaveEvent(QEvent* event) override;        ///< Track pointer leaving viewport
     bool event(QEvent* event) override;  ///< Forwards touch events to handler
+
+    // Plan D2: cross-document page-transfer drop target.
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
     
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
 private slots:
@@ -2597,6 +2622,11 @@ private:
     mutable QSizeF m_cachedContentSize;   ///< Cached total content size (computed during layout)
     mutable bool m_pageLayoutDirty = true; ///< True if cache needs rebuild
     
+    // ===== Plan D2: page-transfer drop state =====
+    bool m_dropIndicatorActive = false;   ///< True while a valid transfer drag hovers
+    int m_dropInsertIndex = -1;           ///< Current 0-based insertion index [0, pageCount]
+    QLineF m_dropIndicatorLine;           ///< Indicator line in VIEWPORT coordinates
+    
     // ===== Input State (Task 1.3.8) =====
     int m_activeDrawingPage = -1;       ///< Page currently receiving strokes (-1 = none)
     bool m_pointerActive = false;       ///< True if pointer is pressed
@@ -2800,6 +2830,14 @@ private:
      * @brief Invalidate page layout cache - call when pages added/removed/resized.
      */
     void invalidatePageLayoutCache() { m_pageLayoutDirty = true; }
+    
+    /**
+     * @brief Compute the page-transfer insertion index for a drop position (Plan D2).
+     * @param viewportPos Position in viewport (widget) coordinates.
+     * @param outLineViewport Set to the indicator line in viewport coordinates.
+     * @return 0-based insertion index in [0, pageCount].
+     */
+    int dropInsertIndexAt(const QPointF& viewportPos, QLineF& outLineViewport) const;
     
     /**
      * @brief Check and apply auto-layout if enabled.

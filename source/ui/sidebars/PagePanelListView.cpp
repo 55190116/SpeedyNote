@@ -304,6 +304,14 @@ void PagePanelListView::startDrag(Qt::DropActions supportedActions)
     if (m_isTouchInput && !m_longPressTriggered) {
         return;
     }
+
+    // Plan D2: in select mode, hand off to PagePanel to build a custom
+    // multi-page cross-document transfer drag (do not run the reorder path,
+    // which collapses the multi-selection to a single index).
+    if (m_selectMode) {
+        emit selectionDragRequested();
+        return;
+    }
     
     // Get selected indexes, fallback to pressed index
     QModelIndexList indexes = selectedIndexes();
@@ -370,6 +378,13 @@ void PagePanelListView::onLongPressTimeout()
     if (m_pressedIndex.isValid()) {
         // Disable QListView's auto-scroll during drag (we implement our own in dragMoveEvent)
         setAutoScroll(false);
+        
+        // Plan D2: in select mode, start a multi-page transfer drag without
+        // collapsing the current multi-selection (do NOT setCurrentIndex).
+        if (m_selectMode) {
+            emit selectionDragRequested();
+            return;
+        }
         
         // Select the item
         setCurrentIndex(m_pressedIndex);

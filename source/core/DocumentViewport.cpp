@@ -46,6 +46,11 @@
 #include <QPlainTextEdit>  // For text input focus check
 #include <QElapsedTimer>  // For double/triple click detection (Phase A)
 #include <QMimeData>      // For clipboard content type check (O2.4)
+#include <QDragEnterEvent> // Plan D2: cross-document page-transfer drops
+#include <QDragMoveEvent>
+#include <QDragLeaveEvent>
+#include <QDropEvent>
+#include "PageTransferMime.h"
 
 #ifdef Q_OS_ANDROID
 #include <QJniObject>       // BUG-A008: JNI for eraser tool type detection
@@ -144,6 +149,9 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     // Note: Touch-synthesized mouse events are still rejected in mouse handlers
     // to prevent touch from triggering drawing (drawing is stylus/mouse only)
     setAttribute(Qt::WA_AcceptTouchEvents, true);
+    
+    // Plan D2: accept cross-document page-transfer drops onto the canvas.
+    setAcceptDrops(true);
     
     // Set focus policy for keyboard shortcuts
     setFocusPolicy(Qt::StrongFocus);
@@ -2521,8 +2529,232 @@ void DocumentViewport::paintEvent(QPaintEvent* event)
         drawEraserCursor(painter);
     }
     
+    // Plan D2: cross-document page-transfer drop insertion indicator.
+    if (m_dropIndicatorActive && !m_dropIndicatorLine.isNull()) {
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        QPen indicatorPen(QColor(0, 122, 255), 3.0);
+        indicatorPen.setCosmetic(true);
+        indicatorPen.setCapStyle(Qt::RoundCap);
+        painter.setPen(indicatorPen);
+        painter.drawLine(m_dropIndicatorLine);
+        painter.restore();
+    }
+    
     // Debug overlay is now handled by DebugOverlay widget (source/ui/DebugOverlay.cpp)
     // Toggle with Ctrl+Shift+D
+}
+
+// ============================================================================
+// Plan D2: cross-document page-transfer drop target
+// ============================================================================
+
+// Decode the payload and reject same-document / edgeless / empty drags.
+static bool acceptablePageTransfer(const QMimeData* mime, const Document* destDoc,
+                                   QString* outToken = nullptr,
+                                   QStringList* outUuids = nullptr)
+{
+    if (!mime || !destDoc || destDoc->isEdgeless()) {
+        return false;
+    }
+    if (!mime->hasFormat(PageTransfer::mimeType())) {
+        return false;
+    }
+    QString token;
+    QStringList uuids;
+    if (!PageTransfer::decode(mime->data(PageTransfer::mimeType()), token, uuids)) {
+        return false;
+    }
+    // Defensive: two viewports should never show the same document, but reject
+    // a same-document drop to avoid accidental self-duplication.
+    if (token == destDoc->sessionId()) {
+        return false;
+    }
+    if (outToken) *outToken = token;
+    if (outUuids) *outUuids = uuids;
+    return true;
+}
+
+void DocumentViewport::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (acceptablePageTransfer(event->mimeData(), m_document)) {
+        m_dropIndicatorActive = true;
+        event->setDropAction(Qt::CopyAction);
+        event->acceptProposedAction();
+        return;
+    }
+    m_dropIndicatorActive = false;
+    event->ignore();
+}
+
+void DocumentViewport::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (!acceptablePageTransfer(event->mimeData(), m_document)) {
+        event->ignore();
+        return;
+    }
+    QLineF line;
+    m_dropInsertIndex = dropInsertIndexAt(event->position(), line);
+    m_dropIndicatorLine = line;
+    m_dropIndicatorActive = true;
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+    update();
+}
+
+void DocumentViewport::dragLeaveEvent(QDragLeaveEvent* event)
+{
+    Q_UNUSED(event);
+    if (m_dropIndicatorActive) {
+        m_dropIndicatorActive = false;
+        m_dropInsertIndex = -1;
+        m_dropIndicatorLine = QLineF();
+        update();
+    }
+}
+
+void DocumentViewport::dropEvent(QDropEvent* event)
+{
+    QString token;
+    QStringList uuids;
+    const bool ok = acceptablePageTransfer(event->mimeData(), m_document, &token, &uuids);
+
+    // Clear indicator regardless of outcome.
+    const int destIndex = m_dropInsertIndex >= 0
+        ? m_dropInsertIndex
+        : (m_document ? m_document->pageCount() : 0);
+    m_dropIndicatorActive = false;
+    m_dropInsertIndex = -1;
+    m_dropIndicatorLine = QLineF();
+    update();
+
+    if (!ok) {
+        event->ignore();
+        return;
+    }
+
+    event->setDropAction(Qt::CopyAction);
+    event->acceptProposedAction();
+    emit pageTransferDropped(token, uuids, destIndex);
+}
+
+int DocumentViewport::dropInsertIndexAt(const QPointF& viewportPos, QLineF& outLineViewport) const
+{
+    outLineViewport = QLineF();
+    if (!m_document) {
+        return 0;
+    }
+    const int pageCount = m_document->pageCount();
+    if (pageCount == 0) {
+        return 0;
+    }
+
+    ensurePageLayoutCache();
+    const QPointF docPt = viewportToDocument(viewportPos);
+    const qreal contentWidth = totalContentSize().width();
+
+    // Helper to build a horizontal indicator line (viewport coords) at a
+    // document-space Y spanning the content width.
+    auto horizontalLine = [&](qreal docY) {
+        const QPointF a = documentToViewport(QPointF(0, docY));
+        const QPointF b = documentToViewport(QPointF(contentWidth, docY));
+        return QLineF(a, b);
+    };
+
+    if (m_layoutMode == LayoutMode::SingleColumn) {
+        // Insertion index = number of pages whose vertical center is above docPt.
+        int index = 0;
+        for (int i = 0; i < pageCount; ++i) {
+            if (pageRect(i).center().y() <= docPt.y()) {
+                index = i + 1;
+            } else {
+                break;
+            }
+        }
+        index = qBound(0, index, pageCount);
+
+        qreal boundaryY;
+        if (index == 0) {
+            boundaryY = pageRect(0).top();
+        } else if (index >= pageCount) {
+            boundaryY = pageRect(pageCount - 1).bottom();
+        } else {
+            boundaryY = (pageRect(index - 1).bottom() + pageRect(index).top()) / 2.0;
+        }
+        outLineViewport = horizontalLine(boundaryY);
+        return index;
+    }
+
+    // TwoColumn: rows of two pages (left = even index, right = odd index).
+    const int numRows = (pageCount + 1) / 2;
+
+    // Find the row whose vertical span contains docPt.y(), else the nearest.
+    int row = -1;
+    for (int r = 0; r < numRows; ++r) {
+        const int leftIdx = r * 2;
+        QRectF leftRect = pageRect(leftIdx);
+        const int rightIdx = leftIdx + 1;
+        qreal rowTop = leftRect.top();
+        qreal rowBottom = leftRect.bottom();
+        if (rightIdx < pageCount) {
+            QRectF rightRect = pageRect(rightIdx);
+            rowTop = qMin(rowTop, rightRect.top());
+            rowBottom = qMax(rowBottom, rightRect.bottom());
+        }
+        if (docPt.y() < rowTop) {
+            // Above this row -> insert before the row (horizontal indicator).
+            outLineViewport = horizontalLine(rowTop);
+            return qBound(0, leftIdx, pageCount);
+        }
+        if (docPt.y() <= rowBottom) {
+            row = r;
+            break;
+        }
+    }
+
+    if (row < 0) {
+        // Below the last row -> append at end.
+        const int lastIdx = pageCount - 1;
+        outLineViewport = horizontalLine(pageRect(lastIdx).bottom());
+        return pageCount;
+    }
+
+    const int leftIdx = row * 2;
+    const int rightIdx = leftIdx + 1;
+    const QRectF leftRect = pageRect(leftIdx);
+
+    // Vertical indicator line spanning the row's page height at a given docX.
+    auto verticalLine = [&](qreal docX, const QRectF& rect) {
+        const QPointF a = documentToViewport(QPointF(docX, rect.top()));
+        const QPointF b = documentToViewport(QPointF(docX, rect.bottom()));
+        return QLineF(a, b);
+    };
+
+    if (rightIdx >= pageCount) {
+        // Only a left page in this (last) row: before or after it.
+        if (docPt.x() < leftRect.center().x()) {
+            outLineViewport = verticalLine(leftRect.left(), leftRect);
+            return qBound(0, leftIdx, pageCount);
+        }
+        outLineViewport = verticalLine(leftRect.right(), leftRect);
+        return qBound(0, leftIdx + 1, pageCount);
+    }
+
+    const QRectF rightRect = pageRect(rightIdx);
+    if (docPt.x() < leftRect.center().x()) {
+        // Before the left page.
+        outLineViewport = verticalLine(leftRect.left(), leftRect);
+        return qBound(0, leftIdx, pageCount);
+    }
+    if (docPt.x() < rightRect.center().x()) {
+        // Between the two pages.
+        const qreal midX = (leftRect.right() + rightRect.left()) / 2.0;
+        outLineViewport = verticalLine(midX, leftRect);
+        return qBound(0, rightIdx, pageCount);
+    }
+    // After the right page.
+    outLineViewport = verticalLine(rightRect.right(), rightRect);
+    return qBound(0, rightIdx + 1, pageCount);
 }
 
 void DocumentViewport::resizeEvent(QResizeEvent* event)

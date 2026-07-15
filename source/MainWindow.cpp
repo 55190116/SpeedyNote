@@ -447,20 +447,35 @@ MainWindow::MainWindow(QWidget *parent)
         });
     };
 
+    // Plan D2: wire per-viewport page-transfer drop signals for BOTH panes
+    // (including background/non-active viewports). Idempotent via UniqueConnection
+    // so it can be re-run when the right pane's TabManager appears.
+    auto wireViewportTransferSignals = [this]() {
+        m_splitViewManager->forEachTabManager([this](TabManager* tm, SplitViewManager::Pane){
+            connect(tm, &TabManager::viewportCreated,
+                    this, &MainWindow::connectViewportTransferSignal,
+                    Qt::UniqueConnection);
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                connectViewportTransferSignal(tm->viewportAt(i));
+            }
+        });
+    };
+
     // Smart tool auto-switch: clear override when split view closes.
     // Also wire the freshly-created right TabManager when split turns on
     // (split-off doesn't need a re-hook: left is already wired and the
     // post-merge title refresh comes from SplitViewManager's own
     // activeViewportChanged emit at the end of destroyRightPane()).
     connect(m_splitViewManager, &SplitViewManager::splitStateChanged, this,
-            [this, wireTabTitleSignals](bool isSplit) {
+            [this, wireTabTitleSignals, wireViewportTransferSignals](bool isSplit) {
         if (!isSplit) clearToolOverride(false);
-        else wireTabTitleSignals();
+        else { wireTabTitleSignals(); wireViewportTransferSignals(); }
     });
 
     // Initial hookup for the left TabManager (created in SplitViewManager's
     // ctor); right pane gets wired lazily via splitStateChanged above.
     wireTabTitleSignals();
+    wireViewportTransferSignals();
 
     // Auto-hide the tab bar container when only one notebook is open.
     // The filename click in NavigationBar still toggles visibility as a
@@ -4433,14 +4448,99 @@ void MainWindow::copyPagesToOtherDocument(const QList<int>& srcRows)
     // The destination is a different (non-active) viewport, so the
     // pageStructureChangedByUndo handler (wired only to the active viewport)
     // does not run. Refresh the destination manually.
-    dest.vp->notifyDocumentStructureChanged();
-    dest.vp->scrollToPage(destIndex);
-    dest.tm->markTabModified(dest.tabIndex, true);
-    refreshOutlineAvailability(dest.doc);
+    refreshDestinationAfterImport(dest.vp, destIndex);
 
     QMessageBox::information(this, tr("Copy Pages"),
         tr("Copied %n page(s) to \"%1\".", "", srcUuids.size())
             .arg(dest.doc->displayName()));
+}
+
+// ============================================================================
+// Plan D2: cross-document page-transfer drag-and-drop
+// ============================================================================
+
+void MainWindow::connectViewportTransferSignal(DocumentViewport* vp)
+{
+    if (!vp) {
+        return;
+    }
+    // Idempotent: safe to call for viewports that are already wired.
+    connect(vp, &DocumentViewport::pageTransferDropped,
+            this, &MainWindow::handlePageTransferDrop,
+            Qt::UniqueConnection);
+}
+
+void MainWindow::refreshDestinationAfterImport(DocumentViewport* destVp, int destIndex)
+{
+    if (!destVp) {
+        return;
+    }
+    Document* destDoc = destVp->document();
+    if (!destDoc) {
+        return;
+    }
+
+    destVp->notifyDocumentStructureChanged();
+    destVp->scrollToPage(qBound(0, destIndex, qMax(0, destDoc->pageCount() - 1)));
+    refreshOutlineAvailability(destDoc);
+
+    // Mark the owning tab modified (in whichever pane it lives).
+    if (m_splitViewManager) {
+        m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                if (tm->viewportAt(i) == destVp) {
+                    tm->markTabModified(i, true);
+                    return;
+                }
+            }
+        });
+    }
+
+    // If the destination happens to be the active viewport, also refresh the
+    // shared page panel (bound to the active document).
+    if (destVp == currentViewport()) {
+        notifyPageStructureChanged(destDoc, destVp->currentPageIndex());
+    }
+}
+
+void MainWindow::handlePageTransferDrop(const QString& srcToken,
+                                        const QStringList& srcUuids, int destIndex)
+{
+    DocumentViewport* destVp = qobject_cast<DocumentViewport*>(sender());
+    if (!destVp || !destVp->document() || srcUuids.isEmpty()) {
+        return;
+    }
+    Document* destDoc = destVp->document();
+
+    // Resolve the source token to a live open Document via its sessionId().
+    Document* srcDoc = nullptr;
+    if (m_splitViewManager) {
+        m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+            if (srcDoc) {
+                return;
+            }
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                DocumentViewport* vp = tm->viewportAt(i);
+                Document* doc = vp ? vp->document() : nullptr;
+                if (doc && doc->sessionId() == srcToken) {
+                    srcDoc = doc;
+                    return;
+                }
+            }
+        });
+    }
+
+    // Guard: source no longer open, or same-document drop (defensive).
+    if (!srcDoc || srcDoc == destDoc) {
+        return;
+    }
+
+    const int clampedIndex = qBound(0, destIndex, destDoc->pageCount());
+    if (!destVp->importPagesWithUndo(srcDoc, srcUuids, clampedIndex)) {
+        return;
+    }
+
+    refreshDestinationAfterImport(destVp, clampedIndex);
 }
 
 void MainWindow::openPdfDocument(const QString &filePath)

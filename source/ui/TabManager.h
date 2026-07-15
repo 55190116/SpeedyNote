@@ -219,6 +219,16 @@ signals:
     void currentViewportChanged(DocumentViewport* viewport);
 
     /**
+     * @brief Emitted when a new viewport is created (Plan D2).
+     * @param viewport The freshly created viewport.
+     *
+     * Fired for every tab creation in this manager so listeners can wire
+     * per-viewport signals (e.g. cross-document page-transfer drops) for
+     * background/non-active viewports too, not only the active one.
+     */
+    void viewportCreated(DocumentViewport* viewport);
+
+    /**
      * @brief Emitted when the *currently active* tab's display text changes.
      *
      * Fires from setTabTitle() / markTabModified() only when the affected

@@ -5,6 +5,7 @@
 #include "../ThumbnailRenderer.h"
 #include "../dialogs/PageRangeSelectDialog.h"
 #include "../../core/Document.h"
+#include "../../core/PageTransferMime.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -14,6 +15,10 @@
 #include <QTimer>
 #include <QResizeEvent>
 #include <QDialog>
+#include <QDrag>
+#include <QMimeData>
+#include <QPainter>
+#include <QPixmap>
 #include <algorithm>
 
 // ============================================================================
@@ -164,6 +169,10 @@ void PagePanel::setupConnections()
     // Long-press drag request (touch input)
     connect(m_listView, &PagePanelListView::dragRequested,
             this, &PagePanel::onDragRequested);
+
+    // Plan D2: multi-page cross-document transfer drag (select mode)
+    connect(m_listView, &PagePanelListView::selectionDragRequested,
+            this, &PagePanel::startSelectionDrag);
     
     // Page dropped from model
     connect(m_model, &PageThumbnailModel::pageDropped, 
@@ -381,16 +390,20 @@ void PagePanel::setSelectMode(bool enabled)
     m_selectMode = enabled;
 
     if (enabled) {
-        // Multi-select; reorder drag would fight rubber-band/range selection.
+        // Multi-select; the list becomes a drag SOURCE only (Plan D2 custom
+        // multi-page transfer drag), and does not accept reorder drops.
         m_listView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-        m_listView->setDragDropMode(QAbstractItemView::NoDragDrop);
-        m_listView->setDragEnabled(false);
+        m_listView->setDragDropMode(QAbstractItemView::DragOnly);
+        m_listView->setDragEnabled(true);
+        m_listView->setAcceptDrops(false);
     } else {
         m_listView->setSelectionMode(QAbstractItemView::SingleSelection);
         m_listView->setDragEnabled(true);
+        m_listView->setAcceptDrops(true);
         m_listView->setDragDropMode(QAbstractItemView::InternalMove);
         m_listView->setDefaultDropAction(Qt::MoveAction);
     }
+    m_listView->setSelectMode(enabled);
 
     m_listView->clearSelection();
 
@@ -632,6 +645,96 @@ void PagePanel::onDragRequested(const QModelIndex& index)
     
     // Start drag operation (triggered by long-press on touch)
     m_listView->beginDrag(Qt::MoveAction);
+}
+
+void PagePanel::startSelectionDrag()
+{
+    if (!m_document) {
+        return;
+    }
+
+    const QList<int> rows = selectedRows();
+    if (rows.isEmpty()) {
+        return;
+    }
+
+    // Resolve to stable page UUIDs (indices are momentary).
+    QStringList uuids;
+    uuids.reserve(rows.size());
+    for (int row : rows) {
+        const QString uuid = m_document->pageUuidAt(row);
+        if (!uuid.isEmpty()) {
+            uuids.append(uuid);
+        }
+    }
+    if (uuids.isEmpty()) {
+        return;
+    }
+
+    QMimeData* mime = new QMimeData();
+    mime->setData(PageTransfer::mimeType(),
+                  PageTransfer::encode(m_document->sessionId(), uuids));
+
+    QDrag* drag = new QDrag(this);
+    drag->setMimeData(mime);
+    drag->setPixmap(makeSelectionDragPixmap(rows));
+    // Hotspot near the top-left so the badge trails the cursor.
+    drag->setHotSpot(QPoint(16, 12));
+
+    // Copy semantics: pages are duplicated into the destination document.
+    drag->exec(Qt::CopyAction);
+}
+
+QPixmap PagePanel::makeSelectionDragPixmap(const QList<int>& rows) const
+{
+    const int count = rows.size();
+
+    // Base pixmap: the first selected page's thumbnail if available.
+    QPixmap base;
+    if (!rows.isEmpty()) {
+        base = thumbnailForPage(rows.first());
+    }
+
+    const int badgeSize = 26;
+    QSize canvas = base.isNull() ? QSize(120, 90)
+                                 : base.size().boundedTo(QSize(140, 180));
+    // Ensure room for the badge in the top-left corner.
+    canvas = canvas.expandedTo(QSize(badgeSize + 8, badgeSize + 8));
+
+    QPixmap pixmap(canvas);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+
+    if (!base.isNull()) {
+        QPixmap scaled = base.scaled(canvas, Qt::KeepAspectRatio,
+                                     Qt::SmoothTransformation);
+        painter.setOpacity(0.85);
+        painter.drawPixmap(QPoint(0, 0), scaled);
+        painter.setOpacity(1.0);
+    } else {
+        painter.setBrush(QColor(120, 120, 120, 200));
+        painter.setPen(Qt::NoPen);
+        painter.drawRoundedRect(pixmap.rect().adjusted(1, 1, -1, -1), 6, 6);
+    }
+
+    // Count badge (top-left).
+    const QRect badgeRect(4, 4, badgeSize, badgeSize);
+    painter.setBrush(QColor(0, 122, 255));
+    painter.setPen(QPen(Qt::white, 1.5));
+    painter.drawEllipse(badgeRect);
+
+    QFont font = painter.font();
+    font.setBold(true);
+    font.setPointSizeF(font.pointSizeF() * 0.95);
+    painter.setFont(font);
+    painter.setPen(Qt::white);
+    painter.drawText(badgeRect, Qt::AlignCenter, QString::number(count));
+
+    painter.end();
+    return pixmap;
 }
 
 // ============================================================================
