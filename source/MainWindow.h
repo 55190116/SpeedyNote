@@ -405,6 +405,9 @@ private slots:
 #ifdef SPEEDYNOTE_DEBUG
     void importPagesFromOtherDocDebug();  // Plan B temp: import pages from another open doc
 #endif
+    // Plan D1: copy the given selected pages (0-based indices in the active
+    // document) into another open document chosen via a dialog.
+    void copyPagesToOtherDocument(const QList<int>& srcRows);
     void openPdfDocument(const QString &filePath = QString());       // doc-1.4: Open PDF file (Ctrl+Shift+O)
     bool isDarkMode();
 

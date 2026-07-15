@@ -124,6 +124,7 @@
 // #include "HandwritingLineEdit.h"
 #include "ControlPanelDialog.h"  // Phase CP.1: Re-enabled with cleaned up tabs
 #include "ui/dialogs/DocumentSettingsDialog.h"  // Per-document override panel
+#include "ui/dialogs/CopyPagesToDocDialog.h"  // Plan D1: cross-document page copy
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
 #include "SDLControllerManager.h"
 #endif
@@ -4344,6 +4345,104 @@ void MainWindow::importPagesFromOtherDocDebug()
 }
 #endif
 
+void MainWindow::copyPagesToOtherDocument(const QList<int>& srcRows)
+{
+    if (srcRows.isEmpty()) {
+        return;
+    }
+
+    DocumentViewport* srcVp = currentViewport();
+    Document* srcDoc = srcVp ? srcVp->document() : nullptr;
+    if (!srcVp || !srcDoc) {
+        return;
+    }
+
+    // Resolve selected page indices to stable UUIDs (indices are momentary).
+    QStringList srcUuids;
+    for (int row : srcRows) {
+        const QString uuid = srcDoc->pageUuidAt(row);
+        if (!uuid.isEmpty()) {
+            srcUuids.append(uuid);
+        }
+    }
+    if (srcUuids.isEmpty()) {
+        return;
+    }
+
+    // Enumerate every other open, paged document across both panes.
+    struct Candidate {
+        TabManager* tm = nullptr;
+        int tabIndex = -1;
+        DocumentViewport* vp = nullptr;
+        Document* doc = nullptr;
+    };
+    QVector<Candidate> candidates;
+    QHash<QString, int> nameCounts;  // for disambiguating duplicate names
+    if (m_splitViewManager) {
+        m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+            for (int i = 0; i < tm->tabCount(); ++i) {
+                DocumentViewport* vp = tm->viewportAt(i);
+                Document* doc = vp ? vp->document() : nullptr;
+                if (!doc || doc == srcDoc || doc->isEdgeless()) {
+                    continue;
+                }
+                candidates.append({tm, i, vp, doc});
+                nameCounts[doc->displayName()]++;
+            }
+        });
+    }
+
+    if (candidates.isEmpty()) {
+        QMessageBox::information(this, tr("Copy Pages"),
+            tr("Open another document in a tab or split pane to copy pages into it."));
+        return;
+    }
+
+    // Build display labels; disambiguate duplicate names with the bundle folder.
+    QList<CopyPagesToDocDialog::DestEntry> entries;
+    entries.reserve(candidates.size());
+    for (const Candidate& c : candidates) {
+        QString label = c.doc->displayName();
+        if (nameCounts.value(label) > 1) {
+            const QString folder = QFileInfo(c.doc->bundlePath()).fileName();
+            if (!folder.isEmpty()) {
+                label = tr("%1 (%2)").arg(label, folder);
+            }
+        }
+        entries.append({label, c.doc->pageCount()});
+    }
+
+    CopyPagesToDocDialog dialog(entries, srcUuids.size(), this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const int chosen = dialog.selectedDocIndex();
+    if (chosen < 0 || chosen >= candidates.size()) {
+        return;
+    }
+    const Candidate& dest = candidates[chosen];
+    const int destIndex = qBound(0, dialog.insertIndex(), dest.doc->pageCount());
+
+    if (!dest.vp->importPagesWithUndo(srcDoc, srcUuids, destIndex)) {
+        QMessageBox::warning(this, tr("Copy Pages"),
+                             tr("Failed to copy the selected pages."));
+        return;
+    }
+
+    // The destination is a different (non-active) viewport, so the
+    // pageStructureChangedByUndo handler (wired only to the active viewport)
+    // does not run. Refresh the destination manually.
+    dest.vp->notifyDocumentStructureChanged();
+    dest.vp->scrollToPage(destIndex);
+    dest.tm->markTabModified(dest.tabIndex, true);
+    refreshOutlineAvailability(dest.doc);
+
+    QMessageBox::information(this, tr("Copy Pages"),
+        tr("Copied %n page(s) to \"%1\".", "", srcUuids.size())
+            .arg(dest.doc->displayName()));
+}
+
 void MainWindow::openPdfDocument(const QString &filePath)
 {
     // Phase doc-1.4: Open PDF file and create PDF-backed document
@@ -7667,6 +7766,12 @@ void MainWindow::setupPagePanelConnections()
         if (m_pagePanel) {
             m_pagePanel->clearSelectionAfterDelete();
         }
+    });
+    
+    // Copy the selected pages into another open document (Plan D1).
+    connect(pagePanel, &PagePanel::copySelectedRequested, this,
+            [this](const QList<int>& indices) {
+        copyPagesToOtherDocument(indices);
     });
     
 #ifdef SPEEDYNOTE_DEBUG

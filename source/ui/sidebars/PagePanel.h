@@ -217,6 +217,13 @@ signals:
      */
     void deleteSelectedRequested(const QList<int>& indices);
 
+    /**
+     * @brief Emitted when the user requests copying the selected pages to
+     *        another open document (Plan D1).
+     * @param indices 0-based page indices to copy.
+     */
+    void copySelectedRequested(const QList<int>& indices);
+
 public slots:
     /**
      * @brief Handle current page change from viewport.
@@ -277,6 +284,7 @@ private:
     QLabel* m_selectionCountLabel = nullptr;
     QPushButton* m_rangeButton = nullptr;
     QPushButton* m_clearButton = nullptr;
+    QPushButton* m_copyButton = nullptr;
     QPushButton* m_deleteButton = nullptr;
 
     // State

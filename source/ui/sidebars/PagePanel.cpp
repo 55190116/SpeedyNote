@@ -56,14 +56,17 @@ void PagePanel::setupUI()
     m_selectionCountLabel = new QLabel(tr("0 selected"), m_selectionHeader);
     m_rangeButton = new QPushButton(tr("Range..."), m_selectionHeader);
     m_clearButton = new QPushButton(tr("Clear"), m_selectionHeader);
+    m_copyButton = new QPushButton(tr("Copy to..."), m_selectionHeader);
     m_deleteButton = new QPushButton(tr("Delete"), m_selectionHeader);
     m_rangeButton->setCursor(Qt::PointingHandCursor);
     m_clearButton->setCursor(Qt::PointingHandCursor);
+    m_copyButton->setCursor(Qt::PointingHandCursor);
     m_deleteButton->setCursor(Qt::PointingHandCursor);
     headerLayout->addWidget(m_selectionCountLabel);
     headerLayout->addStretch(1);
     headerLayout->addWidget(m_rangeButton);
     headerLayout->addWidget(m_clearButton);
+    headerLayout->addWidget(m_copyButton);
     headerLayout->addWidget(m_deleteButton);
     m_selectionHeader->setVisible(false);
     layout->addWidget(m_selectionHeader);
@@ -190,6 +193,12 @@ void PagePanel::setupConnections()
         const QList<int> rows = selectedRows();
         if (!rows.isEmpty()) {
             emit deleteSelectedRequested(rows);
+        }
+    });
+    connect(m_copyButton, &QPushButton::clicked, this, [this]() {
+        const QList<int> rows = selectedRows();
+        if (!rows.isEmpty()) {
+            emit copySelectedRequested(rows);
         }
     });
 }
@@ -441,6 +450,9 @@ void PagePanel::updateSelectionHeader()
     }
     if (m_clearButton) {
         m_clearButton->setEnabled(count > 0);
+    }
+    if (m_copyButton) {
+        m_copyButton->setEnabled(count > 0);
     }
 }
 

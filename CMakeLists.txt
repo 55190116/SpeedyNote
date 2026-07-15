@@ -1053,6 +1053,7 @@ set(APP_SOURCES
     source/ControlPanelDialog.cpp
     source/ui/dialogs/KeyCaptureDialog.cpp
     source/ui/dialogs/PageRangeSelectDialog.cpp
+    source/ui/dialogs/CopyPagesToDocDialog.cpp
     source/ui/dialogs/BatchPdfExportDialog.cpp
     source/ui/dialogs/BatchSnbxExportDialog.cpp
     source/ui/dialogs/ExportResultsDialog.cpp
