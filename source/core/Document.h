@@ -1683,6 +1683,17 @@ private:
     /// in this document (via ensureImportedPdfSourceId) so the copied page renders
     /// in the destination. pdfPageNumber is left unchanged (Plan B-pdf).
     void remapImportedPdfSource(QJsonObject& pageJson, Document* srcDoc);
+    /// Copy every markdown note referenced by a LinkObject markdown slot in
+    /// @p pageJson from @p srcDoc's notes store into this document's notes store
+    /// (skips notes already present; note ids are stable UUIDs so no repoint is
+    /// needed) (Plan B-links).
+    void copyMarkdownNotes(Document* srcDoc, const QJsonObject& pageJson) const;
+    /// Remap LinkObject position-slot targets in @p pageJson: targets inside the
+    /// copied set (present in @p pageUuidMap) are repointed to the new page uuid;
+    /// out-of-set or edgeless targets are made inert (slot emptied) while keeping
+    /// the LinkObject itself. url/markdown/empty slots are untouched (Plan B-links).
+    void remapImportedLinkTargets(QJsonObject& pageJson,
+                                  const QHash<QString, QString>& pageUuidMap) const;
     
     // ===== Paged Mode Lazy Loading (Phase O1.7) =====
     /// Ordered list of page UUIDs. Defines page order in the document.

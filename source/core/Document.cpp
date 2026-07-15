@@ -1214,13 +1214,21 @@ QJsonObject Document::regeneratePageIds(const QJsonObject& pageJson,
 {
     QJsonObject out = pageJson;
 
-    // New page uuid.
+    // New page uuid. If importPagesFrom pre-assigned one (pass 1), reuse it so
+    // in-set link targets can be remapped regardless of page order; otherwise
+    // generate a fresh one (Plan B single-page behavior).
     const QString oldPageUuid = out.value("uuid").toString();
-    const QString newPageUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    out["uuid"] = newPageUuid;
-    if (!oldPageUuid.isEmpty()) {
-        pageMap.insert(oldPageUuid, newPageUuid);
+    QString newPageUuid;
+    auto pageIt = pageMap.find(oldPageUuid);
+    if (!oldPageUuid.isEmpty() && pageIt != pageMap.end()) {
+        newPageUuid = pageIt.value();
+    } else {
+        newPageUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (!oldPageUuid.isEmpty()) {
+            pageMap.insert(oldPageUuid, newPageUuid);
+        }
     }
+    out["uuid"] = newPageUuid;
 
     // New layer ids. Stroke ids are intentionally preserved: they are
     // cross-document-unique UUIDs, are effectively page-scoped (OCR suppression
@@ -1359,6 +1367,103 @@ void Document::remapImportedPdfSource(QJsonObject& pageJson, Document* srcDoc)
     }
 }
 
+void Document::copyMarkdownNotes(Document* srcDoc, const QJsonObject& pageJson) const
+{
+    // No bundle to copy into (unsaved destination): notes cannot travel yet.
+    // Same limitation as copyImageAssets; the real UI operates on saved docs.
+    if (!srcDoc || m_bundlePath.isEmpty()) {
+        return;
+    }
+
+    const QString srcNotes = srcDoc->notesPath();
+    const QString destNotes = notesPath();  // Creates assets/notes if missing.
+    if (srcNotes.isEmpty() || destNotes.isEmpty()) {
+        return;
+    }
+
+    const QJsonArray objects = pageJson.value("objects").toArray();
+    for (const QJsonValue& v : objects) {
+        const QJsonObject obj = v.toObject();
+        if (obj.value("type").toString() != QStringLiteral("link")) {
+            continue;
+        }
+        const QJsonArray slotArr = obj.value("slots").toArray();
+        for (const QJsonValue& sv : slotArr) {
+            const QJsonObject slot = sv.toObject();
+            if (slot.value("type").toString() != QStringLiteral("markdown")) {
+                continue;
+            }
+            const QString noteId = slot.value("noteId").toString();
+            if (noteId.isEmpty()) {
+                continue;
+            }
+            const QString destFile = destNotes + "/" + noteId + ".md";
+            if (QFile::exists(destFile)) {
+                continue;  // Dedup by id: note already present.
+            }
+            const QString srcFile = srcNotes + "/" + noteId + ".md";
+            if (QFile::exists(srcFile)) {
+                QFile::copy(srcFile, destFile);
+            }
+        }
+    }
+}
+
+void Document::remapImportedLinkTargets(QJsonObject& pageJson,
+                                        const QHash<QString, QString>& pageUuidMap) const
+{
+    QJsonArray objects = pageJson.value("objects").toArray();
+    bool objectsChanged = false;
+
+    for (int i = 0; i < objects.size(); ++i) {
+        QJsonObject obj = objects[i].toObject();
+        if (obj.value("type").toString() != QStringLiteral("link")) {
+            continue;
+        }
+
+        QJsonArray slotArr = obj.value("slots").toArray();
+        bool slotsChanged = false;
+
+        for (int j = 0; j < slotArr.size(); ++j) {
+            QJsonObject slot = slotArr[j].toObject();
+            if (slot.value("type").toString() != QStringLiteral("position")) {
+                continue;  // url / markdown / empty are left untouched.
+            }
+
+            if (slot.value("edgeless").toBool()) {
+                // Edgeless tile coordinates cannot be validly remapped into
+                // another document: make the slot inert.
+                slotArr[j] = QJsonObject{{"type", "empty"}};
+                slotsChanged = true;
+                continue;
+            }
+
+            const QString targetUuid = slot.value("pageUuid").toString();
+            auto it = pageUuidMap.find(targetUuid);
+            if (it != pageUuidMap.end()) {
+                // Target page is inside the copied set: repoint to its new uuid.
+                slot["pageUuid"] = it.value();
+                slotArr[j] = slot;
+            } else {
+                // Target is outside the set / another document: make inert but
+                // keep the LinkObject itself (description, icon, other slots).
+                slotArr[j] = QJsonObject{{"type", "empty"}};
+            }
+            slotsChanged = true;
+        }
+
+        if (slotsChanged) {
+            obj["slots"] = slotArr;
+            objects[i] = obj;
+            objectsChanged = true;
+        }
+    }
+
+    if (objectsChanged) {
+        pageJson["objects"] = objects;
+    }
+}
+
 PageImportResult Document::importPagesFrom(Document* srcDoc, const QStringList& srcPageUuids, int destIndex)
 {
     PageImportResult result;
@@ -1371,13 +1476,28 @@ PageImportResult Document::importPagesFrom(Document* srcDoc, const QStringList& 
     if (destIndex < 0) destIndex = 0;
     if (destIndex > maxIndex) destIndex = maxIndex;
 
-    int inserted = 0;
-    for (const QString& srcUuid : srcPageUuids) {
-        const int srcIdx = srcDoc->pageIndexByUuid(srcUuid);
-        if (srcIdx < 0) {
-            continue;
+    // Validate + preserve order.
+    QStringList validUuids;
+    for (const QString& u : srcPageUuids) {
+        if (srcDoc->pageIndexByUuid(u) >= 0) {
+            validUuids.append(u);
         }
-        Page* srcPage = srcDoc->page(srcIdx);  // Loads the page (and its images).
+    }
+    if (validUuids.isEmpty()) {
+        return result;
+    }
+
+    // Pass 1: pre-assign every new page uuid so in-set link targets can be
+    // remapped regardless of page order (a link on the first page may target
+    // the last page). regeneratePageIds reuses these pre-seeded mappings.
+    for (const QString& u : validUuids) {
+        result.pageUuidMap.insert(u, QUuid::createUuid().toString(QUuid::WithoutBraces));
+    }
+
+    // Pass 2: per-page deep copy.
+    int inserted = 0;
+    for (const QString& srcUuid : validUuids) {
+        Page* srcPage = srcDoc->page(srcDoc->pageIndexByUuid(srcUuid));  // Loads page + images.
         if (!srcPage) {
             continue;
         }
@@ -1395,8 +1515,18 @@ PageImportResult Document::importPagesFrom(Document* srcDoc, const QStringList& 
         // its pdfSourceId so the copied page renders in the destination.
         remapImportedPdfSource(json, srcDoc);
 
-        // Regenerate ids so the copy is fully independent of the source.
+        // Plan B-links: copy referenced markdown notes into this bundle (dedup by
+        // id; noteId stays stable so no repoint is needed).
+        copyMarkdownNotes(srcDoc, json);
+
+        // Regenerate ids so the copy is fully independent of the source (reuses
+        // the page uuid pre-assigned in pass 1).
         QJsonObject finalJson = regeneratePageIds(json, result.pageUuidMap, result.objectIdMap);
+
+        // Plan B-links: remap position-link targets (in-set -> new page uuid;
+        // out-of-set / edgeless -> inert). Runs after regen because the full
+        // pageUuidMap is now known.
+        remapImportedLinkTargets(finalJson, result.pageUuidMap);
 
         if (restorePageFromSnapshot(destIndex + inserted, finalJson)) {
             if (result.destStartIndex < 0) {
