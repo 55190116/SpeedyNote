@@ -123,6 +123,7 @@ void OutlinePanel::clearOutline()
     m_tree->clear();
     m_expandedItems.clear();
     m_lastHighlightedPage = -1;
+    m_lastHighlightSource.clear();
 }
 
 void OutlinePanel::populateTree(const QVector<PdfOutlineItem>& items, QTreeWidgetItem* parent)

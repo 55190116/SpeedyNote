@@ -2894,8 +2894,9 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
     if (m_leftSidebar) {
         OutlinePanel* outlinePanel = m_leftSidebar->outlinePanel();
         if (outlinePanel) {
-            // Connect viewport's currentPageChanged to outline highlighting
-            // Note: Outline stores PDF page indices, so we convert notebook page → PDF page
+            // Connect viewport's currentPageChanged to outline highlighting.
+            // OUT1: resolve the page's owning source + ORIGINAL page and highlight
+            // scoped to that source (multi-source aware, no primary PDF required).
             m_outlinePageConn = connect(viewport, &DocumentViewport::currentPageChanged,
                                         this, [outlinePanel, viewport]() {
                 Document* doc = viewport->document();
@@ -3654,12 +3655,17 @@ void MainWindow::updateOutlinePanelForDocument(Document* doc)
         };
     collect(outline);
     if (contributing.size() > 1) {
-        for (const QString& src : order) {
-            sourceSlots.insert(src, doc->paletteSlotForSource(src));
+        // The palette slot IS the index in sourceDisplayOrder(); use the local
+        // `order` directly instead of paletteSlotForSource() (which would rebuild
+        // the order list for every source).
+        for (int i = 0; i < order.size(); ++i) {
+            sourceSlots.insert(order[i], i);
         }
     }
 
-    outlinePanel->setOutline(outline, sourceSlots, computeUnavailableOutlinePages(doc));
+    // Reuse the outline we just built; computing availability from it avoids a
+    // second (uncached) TOC parse of every PDF source.
+    outlinePanel->setOutline(outline, sourceSlots, computeUnavailableOutlinePages(doc, outline));
     m_leftSidebar->showOutlineTab(true);
     
 #ifdef SPEEDYNOTE_DEBUG
@@ -3670,16 +3676,20 @@ void MainWindow::updateOutlinePanelForDocument(Document* doc)
 
 QSet<QString> MainWindow::computeUnavailableOutlinePages(Document* doc) const
 {
+    if (!doc) {
+        return {};
+    }
+    return computeUnavailableOutlinePages(doc, doc->aggregatedOutline());
+}
+
+QSet<QString> MainWindow::computeUnavailableOutlinePages(Document* doc,
+                                                         const QVector<PdfOutlineItem>& outline) const
+{
     // OUT1: an outline entry is "unavailable" (greyed/inert) when its target
     // (sourceId, ORIGINAL page) is no longer present in the notebook. Keys are
     // OutlinePanel::keyFor(sourceId, originalPage).
     QSet<QString> unavailable;
-    if (!doc) {
-        return unavailable;
-    }
-
-    const QVector<PdfOutlineItem> outline = doc->aggregatedOutline();
-    if (outline.isEmpty()) {
+    if (!doc || outline.isEmpty()) {
         return unavailable;
     }
 

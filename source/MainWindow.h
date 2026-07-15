@@ -54,6 +54,7 @@ class PdfSearchBar;
 class PdfSearchEngine;
 struct PdfSearchMatch;
 struct PdfSearchState;
+struct PdfOutlineItem;
 
 // OCR
 class OcrWorker;
@@ -386,6 +387,9 @@ private slots:
     void updateLayerPanelForViewport(DocumentViewport* viewport);  // Phase 5.1: Update LayerPanel
     void updateOutlinePanelForDocument(Document* doc);  // Phase E.2: Update OutlinePanel for document
     QSet<QString> computeUnavailableOutlinePages(Document* doc) const;  // OUT1: keyFor(sourceId, originalPage) of absent outline targets
+    // OUT1: same as above but reuses an already-aggregated outline to avoid a
+    // second (expensive, uncached) TOC parse when the caller already has one.
+    QSet<QString> computeUnavailableOutlinePages(Document* doc, const QVector<PdfOutlineItem>& outline) const;
     void refreshOutlineAvailability(Document* doc);  // Plan A2: re-grey outline entries after structure change
     void updatePagePanelForViewport(DocumentViewport* viewport);  // Page Panel: Task 5.1: Update PagePanel
     void notifyPageStructureChanged(Document* doc, int currentPage = -1);  // Helper: Update PagePanel after page add/remove
