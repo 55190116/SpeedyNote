@@ -402,6 +402,9 @@ private slots:
     void addPageToDocument();     // doc-1.0: Add page at end of document (Ctrl+Shift+A)
     void insertPageInDocument();  // Phase 3: Insert page after current (Ctrl+Shift+I)
     void deletePageInDocument();  // Phase 3B: Delete current page (Ctrl+Shift+D)
+#ifdef SPEEDYNOTE_DEBUG
+    void importPagesFromOtherDocDebug();  // Plan B temp: import pages from another open doc
+#endif
     void openPdfDocument(const QString &filePath = QString());       // doc-1.4: Open PDF file (Ctrl+Shift+O)
     bool isDarkMode();
 

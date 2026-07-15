@@ -1100,6 +1100,14 @@ void MainWindow::setupUi() {
     QAction *lockAllOcrAction = overflowMenu->addAction(tr("Lock All OCR Text"));
     connect(lockAllOcrAction, &QAction::triggered, this, &MainWindow::lockAllOcrText);
 
+#ifdef SPEEDYNOTE_DEBUG
+    // Plan B temp test hook: deep-copy pages from another open document into the
+    // active one. Replaced by the D1/D2 drag-and-drop UI later.
+    overflowMenu->addSeparator();
+    QAction *importPagesDebugAction = overflowMenu->addAction(tr("Import Pages from Other Doc (Debug)..."));
+    connect(importPagesDebugAction, &QAction::triggered, this, &MainWindow::importPagesFromOtherDocDebug);
+#endif
+
 #ifndef Q_OS_MACOS
     // MAC.4 / MAC.5: hidden on macOS — the View menu's 'Go to Page...' (added
     // in MAC.5) is the canonical mouse path; Cmd+G keeps working via
@@ -3612,11 +3620,22 @@ QSet<int> MainWindow::computeUnavailableOutlinePages(Document* doc) const
         return unavailable;
     }
 
+    // Build the set of primary-source PDF pages currently present in the notebook
+    // once (O(pages)), then test each outline target against it (O(1) each),
+    // instead of an O(pages) lookup per outline entry.
+    QSet<int> presentPdfPages;
+    const int pageCount = doc->pageCount();
+    for (int i = 0; i < pageCount; ++i) {
+        const int pdfPage = doc->pdfPageIndexForNotebookPage(i);
+        if (pdfPage >= 0) {
+            presentPdfPages.insert(pdfPage);
+        }
+    }
+
     std::function<void(const QVector<PdfOutlineItem>&)> walk =
         [&](const QVector<PdfOutlineItem>& items) {
             for (const PdfOutlineItem& item : items) {
-                if (item.targetPage >= 0 &&
-                    doc->notebookPageIndexForPdfPage(item.targetPage) < 0) {
+                if (item.targetPage >= 0 && !presentPdfPages.contains(item.targetPage)) {
                     unavailable.insert(item.targetPage);
                 }
                 if (!item.children.isEmpty()) {
@@ -4253,6 +4272,77 @@ void MainWindow::deletePageInDocument()
     // Re-grey any outline entries whose PDF target page was just deleted.
     refreshOutlineAvailability(doc);
 }
+
+#ifdef SPEEDYNOTE_DEBUG
+void MainWindow::importPagesFromOtherDocDebug()
+{
+    DocumentViewport* destVp = currentViewport();
+    if (!destVp || !destVp->document()) {
+        QMessageBox::information(this, tr("Page Import (Debug)"),
+                                 tr("No document is open in the active pane."));
+        return;
+    }
+    Document* destDoc = destVp->document();
+
+    Document* srcDoc = nullptr;
+    DocumentViewport* srcVp = nullptr;
+
+    if (m_splitViewManager) {
+        // Prefer the inactive split-pane viewport when split.
+        if (DocumentViewport* inactive = m_splitViewManager->inactiveViewport()) {
+            if (inactive->document() && inactive->document() != destDoc) {
+                srcVp = inactive;
+                srcDoc = inactive->document();
+            }
+        }
+        // Otherwise scan all tabs in both panes for a different open document.
+        if (!srcDoc) {
+            m_splitViewManager->forEachTabManager([&](TabManager* tm, SplitViewManager::Pane) {
+                if (srcDoc) {
+                    return;
+                }
+                for (int i = 0; i < tm->tabCount(); ++i) {
+                    DocumentViewport* vp = tm->viewportAt(i);
+                    if (vp && vp->document() && vp->document() != destDoc) {
+                        srcVp = vp;
+                        srcDoc = vp->document();
+                        return;
+                    }
+                }
+            });
+        }
+    }
+
+    if (!srcDoc || !srcVp) {
+        QMessageBox::information(this, tr("Page Import (Debug)"),
+                                 tr("Open a second document in another tab or split pane to import from."));
+        return;
+    }
+
+    // Import the source's current page plus the next page (when present) to
+    // exercise grouped multi-page undo in one action.
+    QStringList srcUuids;
+    const int srcPage = srcVp->currentPageIndex();
+    if (srcPage >= 0 && srcPage < srcDoc->pageCount()) {
+        srcUuids.append(srcDoc->pageUuidAt(srcPage));
+        if (srcPage + 1 < srcDoc->pageCount()) {
+            srcUuids.append(srcDoc->pageUuidAt(srcPage + 1));
+        }
+    }
+    if (srcUuids.isEmpty()) {
+        QMessageBox::information(this, tr("Page Import (Debug)"),
+                                 tr("Source document has no pages to import."));
+        return;
+    }
+
+    const int destIndex = qMin(destVp->currentPageIndex() + 1, destDoc->pageCount());
+
+    if (!destVp->importPagesWithUndo(srcDoc, srcUuids, destIndex)) {
+        QMessageBox::warning(this, tr("Page Import (Debug)"),
+                             tr("Import failed."));
+    }
+}
+#endif
 
 void MainWindow::openPdfDocument(const QString &filePath)
 {

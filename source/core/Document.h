@@ -33,6 +33,8 @@
 #include <QPixmap>
 #include <QSet>
 #include <QHash>
+#include <QVector>
+#include <QStringList>
 #include <vector>
 #include <map>
 #include <set>
@@ -116,6 +118,22 @@ struct PdfSource {
     QString bundledFile;        ///< Relative path of the bundled mini-PDF (when bundled)
     QHash<int,int> pageMap;     ///< Original PDF page -> bundled-file page (when bundled)
     bool needsRelink = false;   ///< True when the source file could not be located on load
+};
+
+// ============================================================================
+
+/**
+ * @brief Result of a cross-document page import (Plan B).
+ *
+ * Returned by Document::importPagesFrom. Carries the final, id-regenerated page
+ * JSON for each inserted page (in insertion order, starting at destStartIndex)
+ * plus old->new id maps that later plans (B-links) use to remap link targets.
+ */
+struct PageImportResult {
+    QVector<QJsonObject> insertedPageJson;  ///< Final id-regenerated page JSON, in insertion order
+    int destStartIndex = -1;                ///< Notebook index of the first inserted page
+    QHash<QString, QString> pageUuidMap;    ///< Source page uuid -> new destination uuid
+    QHash<QString, QString> objectIdMap;    ///< Source object id -> new object id
 };
 
 // ============================================================================
@@ -1390,6 +1408,24 @@ public:
      * marks the document modified. Used to undo removePage().
      */
     bool restorePageFromSnapshot(int index, const QJsonObject& pageJson);
+
+    /**
+     * @brief Deep-copy pages from another open document into this one (Plan B).
+     * @param srcDoc The source document to copy pages from (must differ from this).
+     * @param srcPageUuids UUIDs of the source pages to copy, in the desired order.
+     * @param destIndex Notebook index at which to insert the copied pages.
+     * @return A PageImportResult describing the inserted pages, or an empty
+     *         result (insertedPageJson empty) on failure.
+     *
+     * Each source page is serialized (Page::toJson), its referenced image assets
+     * are copied into this document's assets store (content-hash deduped), and its
+     * ids are regenerated (new page uuid, layer ids, object ids; stroke ids kept)
+     * before insertion via restorePageFromSnapshot. PDF-backed pages copy their
+     * (pdfSourceId, pdfPageNumber) verbatim (they render blank until Plan B-pdf
+     * registers the source); LinkObject/markdown targets are copied as-is until
+     * Plan B-links remaps them.
+     */
+    PageImportResult importPagesFrom(Document* srcDoc, const QStringList& srcPageUuids, int destIndex);
     
     /**
      * @brief Move a page from one position to another.
@@ -1623,6 +1659,19 @@ private:
         auto it = m_pdfProviders.find(s->id);
         return it != m_pdfProviders.end() ? it->second.get() : nullptr;
     }
+
+    // ===== Private page-import helpers (Plan B) =====
+    /// Return a copy of @p pageJson with regenerated ids: a new page uuid, new
+    /// layer ids, and new object ids. Stroke ids, image asset references, and link
+    /// targets are left untouched. Records src->new mappings into @p pageMap /
+    /// @p objMap for later link remapping (Plan B-links).
+    QJsonObject regeneratePageIds(const QJsonObject& pageJson,
+                                  QHash<QString, QString>& pageMap,
+                                  QHash<QString, QString>& objMap) const;
+    /// Copy every image asset referenced by @p pageJson from @p srcDoc's assets
+    /// store into this document's assets store (skips assets already present;
+    /// content-hash filenames make this inherently deduped).
+    void copyImageAssets(Document* srcDoc, const QJsonObject& pageJson) const;
     
     // ===== Paged Mode Lazy Loading (Phase O1.7) =====
     /// Ordered list of page UUIDs. Defines page order in the document.

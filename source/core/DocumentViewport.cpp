@@ -12670,6 +12670,13 @@ bool DocumentViewport::deletePagesWithUndo(const QList<int>& indices)
         return false;
     }
 
+    // Clear any object selection first: removePage() frees the page's objects,
+    // and m_selectedObjects holds raw pointers into them that would otherwise
+    // dangle (crash on the next paint / selection query).
+    if (hasSelectedObjects()) {
+        deselectAllObjects();
+    }
+
     // Remove in descending index order so earlier removals don't shift the
     // indices of pages we have yet to remove.
     std::sort(targets.begin(), targets.end(), [](int a, int b) { return a > b; });
@@ -12703,6 +12710,36 @@ bool DocumentViewport::deletePagesWithUndo(const QList<int>& indices)
     clearUndoStacksFrom(minIndex);
     pushUndoAction(action);
 
+    return true;
+}
+
+bool DocumentViewport::importPagesWithUndo(Document* srcDoc, const QStringList& srcPageUuids, int destIndex)
+{
+    if (!m_document || !srcDoc || srcPageUuids.isEmpty()) {
+        return false;
+    }
+
+    PageImportResult result = m_document->importPagesFrom(srcDoc, srcPageUuids, destIndex);
+    if (result.insertedPageJson.isEmpty()) {
+        return false;
+    }
+
+    UndoAction action;
+    action.type = UndoAction::PageInsert;
+    for (int k = 0; k < result.insertedPageJson.size(); ++k) {
+        UndoAction::DeletedPageSnapshot snap;
+        snap.index = result.destStartIndex + k;
+        snap.pageJson = result.insertedPageJson[k];
+        action.deletedPages.append(snap);
+    }
+
+    const int focusIndex = result.destStartIndex >= 0 ? result.destStartIndex : destIndex;
+    action.focusPageIndex = qBound(0, focusIndex, m_document->pageCount() - 1);
+
+    clearUndoStacksFrom(focusIndex);
+    pushUndoAction(action);
+
+    emit pageStructureChangedByUndo(action.focusPageIndex);
     return true;
 }
 
@@ -12854,6 +12891,25 @@ void DocumentViewport::undo()
         emit redoAvailableChanged(canRedo());
         int focus = snaps.isEmpty() ? action.focusPageIndex : snaps.first().index;
         emit pageStructureChangedByUndo(qBound(0, focus, m_document->pageCount() - 1));
+        return;
+    }
+
+    if (action.type == UndoAction::PageInsert) {
+        // Remove imported pages in descending index order (Plan B).
+        if (hasSelectedObjects()) {
+            deselectAllObjects();
+        }
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index > b.index; });
+        for (const auto& snap : snaps) {
+            m_document->removePage(snap.index);
+        }
+        m_redoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        emit pageStructureChangedByUndo(qBound(0, action.focusPageIndex, m_document->pageCount() - 1));
         return;
     }
 
@@ -13158,6 +13214,23 @@ void DocumentViewport::redo()
         emit undoAvailableChanged(canUndo());
         emit redoAvailableChanged(canRedo());
         emit pageStructureChangedByUndo(qBound(0, action.focusPageIndex, m_document->pageCount() - 1));
+        return;
+    }
+
+    if (action.type == UndoAction::PageInsert) {
+        // Re-insert imported pages in ascending index order (Plan B).
+        QVector<UndoAction::DeletedPageSnapshot> snaps = action.deletedPages;
+        std::sort(snaps.begin(), snaps.end(),
+                  [](const UndoAction::DeletedPageSnapshot& a,
+                     const UndoAction::DeletedPageSnapshot& b) { return a.index < b.index; });
+        for (const auto& snap : snaps) {
+            m_document->restorePageFromSnapshot(snap.index, snap.pageJson);
+        }
+        m_undoStack.push(action);
+        emit undoAvailableChanged(canUndo());
+        emit redoAvailableChanged(canRedo());
+        int focus = snaps.isEmpty() ? action.focusPageIndex : snaps.first().index;
+        emit pageStructureChangedByUndo(qBound(0, focus, m_document->pageCount() - 1));
         return;
     }
 

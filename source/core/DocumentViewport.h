@@ -67,7 +67,10 @@ struct UndoAction {
         OcrLockChange,
 
         // ===== Page-structure types (Plan A2) =====
-        PageDelete              ///< One or more whole pages removed; undo restores them
+        PageDelete,             ///< One or more whole pages removed; undo restores them
+
+        // ===== Page-structure types (Plan B) =====
+        PageInsert              ///< One or more whole pages inserted (import); undo removes them
     };
 
     Type type = AddStroke;
@@ -86,7 +89,9 @@ struct UndoAction {
         QJsonObject pageJson;   ///< Page::toJson() snapshot
     };
 
-    // PageDelete payload (grouped: a batch delete pushes one action)
+    // Page-structure payload (grouped: a batch delete/import pushes one action).
+    // For PageDelete the snapshots are the removed pages; for PageInsert they are
+    // the inserted pages (both use the same {index, pageJson} shape).
     QVector<DeletedPageSnapshot> deletedPages;
     int focusPageIndex = 0;     ///< Page to focus after undo/redo of a PageDelete
 
@@ -710,6 +715,21 @@ public:
      * @return True if at least one page was deleted.
      */
     bool deletePagesWithUndo(const QList<int>& indices);
+
+    /**
+     * @brief Import (deep-copy) pages from another document as one undoable action (Plan B).
+     *
+     * Delegates the deep copy to Document::importPagesFrom, then pushes one
+     * grouped PageInsert undo action so a single Ctrl+Z removes the whole imported
+     * batch and Ctrl+Y re-inserts it. Emits pageStructureChangedByUndo so the UI
+     * refreshes and navigates to the insertion point.
+     *
+     * @param srcDoc The source document to copy pages from.
+     * @param srcPageUuids UUIDs of the source pages to copy, in the desired order.
+     * @param destIndex Notebook index at which to insert the copied pages.
+     * @return True if at least one page was imported.
+     */
+    bool importPagesWithUndo(Document* srcDoc, const QStringList& srcPageUuids, int destIndex);
     
     // ===== Object Undo Helpers =====
     

@@ -1204,6 +1204,146 @@ bool Document::restorePageFromSnapshot(int index, const QJsonObject& pageJson)
     return true;
 }
 
+// =========================================================================
+// Cross-document page import (Plan B)
+// =========================================================================
+
+QJsonObject Document::regeneratePageIds(const QJsonObject& pageJson,
+                                        QHash<QString, QString>& pageMap,
+                                        QHash<QString, QString>& objMap) const
+{
+    QJsonObject out = pageJson;
+
+    // New page uuid.
+    const QString oldPageUuid = out.value("uuid").toString();
+    const QString newPageUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    out["uuid"] = newPageUuid;
+    if (!oldPageUuid.isEmpty()) {
+        pageMap.insert(oldPageUuid, newPageUuid);
+    }
+
+    // New layer ids. Stroke ids are intentionally preserved: they are
+    // cross-document-unique UUIDs, are effectively page-scoped (OCR suppression
+    // and undo are keyed per page), and keeping them preserves locked-OCR
+    // sourceStrokeIds linkage without any remap.
+    QJsonArray layers = out.value("layers").toArray();
+    for (int i = 0; i < layers.size(); ++i) {
+        QJsonObject layer = layers[i].toObject();
+        layer["id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        layers[i] = layer;
+    }
+    out["layers"] = layers;
+
+    // New object ids.
+    QJsonArray objects = out.value("objects").toArray();
+    for (int i = 0; i < objects.size(); ++i) {
+        QJsonObject obj = objects[i].toObject();
+        const QString oldId = obj.value("id").toString();
+        const QString newId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        obj["id"] = newId;
+        if (!oldId.isEmpty()) {
+            objMap.insert(oldId, newId);
+        }
+        objects[i] = obj;
+    }
+    out["objects"] = objects;
+
+    return out;
+}
+
+void Document::copyImageAssets(Document* srcDoc, const QJsonObject& pageJson) const
+{
+    // If this document has no bundle yet (unsaved), we cannot copy files. Unsaved
+    // source images travel via the embedded base64 in the page JSON and are
+    // persisted on the next save of this document.
+    if (!srcDoc || m_bundlePath.isEmpty()) {
+        return;
+    }
+
+    const QString srcImagesDir = srcDoc->assetsImagePath();
+    const QString destImagesDir = assetsImagePath();
+    if (srcImagesDir.isEmpty() || destImagesDir.isEmpty()) {
+        return;
+    }
+
+    const QJsonArray objects = pageJson.value("objects").toArray();
+    bool ensuredDir = false;
+    for (const QJsonValue& v : objects) {
+        const QJsonObject obj = v.toObject();
+        if (obj.value("type").toString() != QStringLiteral("image")) {
+            continue;
+        }
+        const QString imagePath = obj.value("imagePath").toString();
+        if (imagePath.isEmpty()) {
+            continue;  // Unsaved image: carried by embedded base64.
+        }
+
+        const QString destFile = destImagesDir + "/" + imagePath;
+        if (QFile::exists(destFile)) {
+            continue;  // Already present (content-hash filenames make this deduped).
+        }
+        const QString srcFile = srcImagesDir + "/" + imagePath;
+        if (!QFile::exists(srcFile)) {
+            continue;  // Broken source reference; base64 (if present) covers it.
+        }
+
+        if (!ensuredDir) {
+            QDir().mkpath(destImagesDir);
+            ensuredDir = true;
+        }
+        QFile::copy(srcFile, destFile);
+    }
+}
+
+PageImportResult Document::importPagesFrom(Document* srcDoc, const QStringList& srcPageUuids, int destIndex)
+{
+    PageImportResult result;
+    if (!srcDoc || srcPageUuids.isEmpty()) {
+        return result;
+    }
+
+    // Clamp the insertion point into [0, pageCount()].
+    const int maxIndex = static_cast<int>(m_pageOrder.size());
+    if (destIndex < 0) destIndex = 0;
+    if (destIndex > maxIndex) destIndex = maxIndex;
+
+    int inserted = 0;
+    for (const QString& srcUuid : srcPageUuids) {
+        const int srcIdx = srcDoc->pageIndexByUuid(srcUuid);
+        if (srcIdx < 0) {
+            continue;
+        }
+        Page* srcPage = srcDoc->page(srcIdx);  // Loads the page (and its images).
+        if (!srcPage) {
+            continue;
+        }
+
+        // Serialize the source page. Persisted images serialize as imagePath +
+        // imageHash; unsaved images embed base64 (recovery fallback).
+        QJsonObject json = srcPage->toJson();
+
+        // Copy referenced on-disk image assets into this document's store BEFORE
+        // insertion, so restorePageFromSnapshot's loadImages() can resolve them.
+        copyImageAssets(srcDoc, json);
+
+        // Regenerate ids so the copy is fully independent of the source.
+        QJsonObject finalJson = regeneratePageIds(json, result.pageUuidMap, result.objectIdMap);
+
+        if (restorePageFromSnapshot(destIndex + inserted, finalJson)) {
+            if (result.destStartIndex < 0) {
+                result.destStartIndex = destIndex;
+            }
+            result.insertedPageJson.append(finalJson);
+            ++inserted;
+        }
+    }
+
+    if (!result.insertedPageJson.isEmpty()) {
+        markModified();
+    }
+    return result;
+}
+
 bool Document::movePage(int from, int to)
 {
     int count = static_cast<int>(m_pageOrder.size());
@@ -1770,7 +1910,13 @@ QJsonObject Document::toJson() const
         obj["pdf_path"] = QString();
     }
 
-    if (m_pdfSources.size() > 1) {
+    // Write the full source list when more than one source exists, OR when any
+    // page explicitly references a non-primary source id. The latter guards the
+    // case where pruning has reduced the registry to a single *promoted* source
+    // (the original primary was deleted): its id must be preserved so its pages
+    // still resolve on reload instead of getting a freshly-synthesized id.
+    const bool writeSourceList = m_pdfSources.size() > 1 || !m_pagePdfSource.empty();
+    if (writeSourceList) {
         QJsonArray sourcesArray;
         for (const PdfSource& s : m_pdfSources) {
             QJsonObject sObj;
