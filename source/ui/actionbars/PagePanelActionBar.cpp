@@ -56,6 +56,13 @@ void PagePanelActionBar::setupUI()
     
     // === Page Management Section ===
     
+    // Select (multi-select mode) toggle
+    m_selectButton = new ActionBarButton(this);
+    m_selectButton->setIconName("select");
+    m_selectButton->setToolTip(tr("Select Multiple Pages"));
+    m_selectButton->setCheckable(true);
+    addButton(m_selectButton);
+    
     // Add Page button
     m_addPageButton = new ActionBarButton(this);
     m_addPageButton->setIconName("addtab");
@@ -96,6 +103,13 @@ void PagePanelActionBar::setupConnections()
     
     connect(m_layoutToggleButton, &ActionBarButton::clicked,
             this, &PagePanelActionBar::layoutToggleClicked);
+    
+    // Select mode toggle
+    connect(m_selectButton, &ActionBarButton::clicked, this, [this]() {
+        m_selectMode = !m_selectMode;
+        m_selectButton->setChecked(m_selectMode);
+        emit selectModeToggled(m_selectMode);
+    });
     
     connect(m_wheelPicker, &PageWheelPicker::currentPageChanged,
             this, &PagePanelActionBar::onWheelPageChanged);
@@ -202,6 +216,9 @@ void PagePanelActionBar::setDarkMode(bool darkMode)
     if (m_wheelPicker) {
         m_wheelPicker->setDarkMode(darkMode);
     }
+    if (m_selectButton) {
+        m_selectButton->setDarkMode(darkMode);
+    }
     if (m_addPageButton) {
         m_addPageButton->setDarkMode(darkMode);
     }
@@ -213,6 +230,17 @@ void PagePanelActionBar::setDarkMode(bool darkMode)
     }
     if (m_layoutToggleButton) {
         m_layoutToggleButton->setDarkMode(darkMode);
+    }
+}
+
+void PagePanelActionBar::setSelectModeChecked(bool checked)
+{
+    if (m_selectMode == checked) {
+        return;
+    }
+    m_selectMode = checked;
+    if (m_selectButton) {
+        m_selectButton->setChecked(checked);
     }
 }
 

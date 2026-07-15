@@ -92,6 +92,15 @@ public:
      */
     void confirmDelete();
 
+    /**
+     * @brief Update the Select toggle's checked state without emitting.
+     * @param checked True to show the toggle as active.
+     *
+     * Used by MainWindow to resync the toggle when the panel exits select
+     * mode internally (e.g. on document switch).
+     */
+    void setSelectModeChecked(bool checked);
+
 signals:
     /**
      * @brief Emitted when Page Up button is clicked.
@@ -141,6 +150,12 @@ signals:
     void undoDeleteClicked();
     
     /**
+     * @brief Emitted when the Select toggle is clicked.
+     * @param enabled True if multi-select mode is now active.
+     */
+    void selectModeToggled(bool enabled);
+
+    /**
      * @brief Emitted when the layout toggle button is clicked.
      * 
      * The caller should toggle between 1-column and auto 1/2 column mode.
@@ -179,6 +194,7 @@ private:
     ActionBarButton* m_layoutToggleButton = nullptr;  // 1-column / Auto toggle
     
     // Page management buttons
+    ActionBarButton* m_selectButton = nullptr;        // Multi-select mode toggle
     ActionBarButton* m_addPageButton = nullptr;
     ActionBarButton* m_insertPageButton = nullptr;
     UndoDeleteButton* m_deleteButton = nullptr;
@@ -187,6 +203,7 @@ private:
     int m_currentPage = 0;
     int m_pageCount = 1;
     bool m_autoLayoutEnabled = false;
+    bool m_selectMode = false;
 };
 
 #endif // PAGEPANELACTIONBAR_H

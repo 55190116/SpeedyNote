@@ -7617,6 +7617,58 @@ void MainWindow::setupPagePanelConnections()
         }
     });
     
+    // -------------------------------------------------------------------------
+    // Multi-select mode (Plan C)
+    // -------------------------------------------------------------------------
+    
+    // Action-bar Select toggle → drive the panel's select mode.
+    if (m_pagePanelActionBar) {
+        connect(m_pagePanelActionBar, &PagePanelActionBar::selectModeToggled,
+                this, [this](bool on) {
+            if (m_pagePanel) {
+                m_pagePanel->setSelectMode(on);
+            }
+        });
+    }
+    
+    // Panel exits select mode internally (e.g. document switch) → resync toggle.
+    connect(pagePanel, &PagePanel::selectModeChanged, this, [this](bool on) {
+        if (m_pagePanelActionBar) {
+            m_pagePanelActionBar->setSelectModeChecked(on);
+        }
+    });
+    
+    // Delete the selected pages as a single grouped-undo action.
+    connect(pagePanel, &PagePanel::deleteSelectedRequested, this,
+            [this](const QList<int>& indices) {
+        DocumentViewport* vp = currentViewport();
+        if (!vp) {
+            return;
+        }
+        Document* doc = vp->document();
+        if (!doc) {
+            return;
+        }
+        // deletePagesWithUndo() already refuses to delete every page and dedups.
+        if (vp->deletePagesWithUndo(indices)) {
+            vp->notifyDocumentStructureChanged();
+            const int newPage = qBound(0, vp->currentPageIndex(), doc->pageCount() - 1);
+            vp->scrollToPage(newPage);
+            notifyPageStructureChanged(doc, newPage);
+            refreshOutlineAvailability(doc);
+            if (tabManager()) {
+                int tabIndex = tabManager()->currentIndex();
+                if (tabIndex >= 0) {
+                    tabManager()->markTabModified(tabIndex, true);
+                }
+            }
+        }
+        // Selection indices are now stale regardless of success.
+        if (m_pagePanel) {
+            m_pagePanel->clearSelectionAfterDelete();
+        }
+    });
+    
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "Page Panel: Connections initialized";
 #endif

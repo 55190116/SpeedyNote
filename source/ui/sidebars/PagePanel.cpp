@@ -3,11 +3,18 @@
 #include "../PageThumbnailModel.h"
 #include "../PageThumbnailDelegate.h"
 #include "../ThumbnailRenderer.h"
+#include "../dialogs/PageRangeSelectDialog.h"
 #include "../../core/Document.h"
 #include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QItemSelectionModel>
 #include <QScrollBar>
 #include <QTimer>
 #include <QResizeEvent>
+#include <QDialog>
+#include <algorithm>
 
 // ============================================================================
 // Constructor / Destructor
@@ -41,6 +48,26 @@ void PagePanel::setupUI()
     // Create delegate
     m_delegate = new PageThumbnailDelegate(this);
     
+    // Create the in-panel selection header (Plan C). Hidden until select mode.
+    m_selectionHeader = new QWidget(this);
+    QHBoxLayout* headerLayout = new QHBoxLayout(m_selectionHeader);
+    headerLayout->setContentsMargins(8, 4, 8, 4);
+    headerLayout->setSpacing(6);
+    m_selectionCountLabel = new QLabel(tr("0 selected"), m_selectionHeader);
+    m_rangeButton = new QPushButton(tr("Range..."), m_selectionHeader);
+    m_clearButton = new QPushButton(tr("Clear"), m_selectionHeader);
+    m_deleteButton = new QPushButton(tr("Delete"), m_selectionHeader);
+    m_rangeButton->setCursor(Qt::PointingHandCursor);
+    m_clearButton->setCursor(Qt::PointingHandCursor);
+    m_deleteButton->setCursor(Qt::PointingHandCursor);
+    headerLayout->addWidget(m_selectionCountLabel);
+    headerLayout->addStretch(1);
+    headerLayout->addWidget(m_rangeButton);
+    headerLayout->addWidget(m_clearButton);
+    headerLayout->addWidget(m_deleteButton);
+    m_selectionHeader->setVisible(false);
+    layout->addWidget(m_selectionHeader);
+
     // Create list view (custom class with long-press drag support)
     m_listView = new PagePanelListView(this);
     configureListView();
@@ -142,6 +169,29 @@ void PagePanel::setupConnections()
     // Invalidation timer
     connect(m_invalidationTimer, &QTimer::timeout, 
             this, &PagePanel::performPendingInvalidation);
+
+    // Selection changes (Plan C): the view's selection model is the single
+    // source of truth for the multi-select set.
+    if (m_listView->selectionModel()) {
+        connect(m_listView->selectionModel(), &QItemSelectionModel::selectionChanged,
+                this, [this](const QItemSelection&, const QItemSelection&) {
+                    onSelectionChanged();
+                });
+    }
+
+    // Selection header buttons
+    connect(m_clearButton, &QPushButton::clicked, this, [this]() {
+        m_listView->clearSelection();
+    });
+    connect(m_rangeButton, &QPushButton::clicked, this, [this]() {
+        openRangeDialog();
+    });
+    connect(m_deleteButton, &QPushButton::clicked, this, [this]() {
+        const QList<int> rows = selectedRows();
+        if (!rows.isEmpty()) {
+            emit deleteSelectedRequested(rows);
+        }
+    });
 }
 
 // ============================================================================
@@ -152,6 +202,12 @@ void PagePanel::setDocument(Document* doc)
 {
     if (m_document == doc) {
         return;
+    }
+    
+    // Selection indices are document-specific: leaving select mode here also
+    // resyncs the action-bar toggle via selectModeChanged.
+    if (m_selectMode) {
+        setSelectMode(false);
     }
     
     m_document = doc;
@@ -292,6 +348,130 @@ void PagePanel::applyTheme()
             background-color: transparent;
         }
     )").arg(bgColor));
+
+    // Selection header (Plan C): match the panel background, readable text.
+    if (m_selectionHeader) {
+        const QString headerBg = m_darkMode ? "#23272b" : "#ECECEC";
+        const QString textColor = m_darkMode ? "#E0E0E0" : "#202020";
+        m_selectionHeader->setStyleSheet(QString(
+            "QWidget { background-color: %1; }"
+            "QLabel { color: %2; }")
+            .arg(headerBg, textColor));
+    }
+}
+
+// ============================================================================
+// Multi-Select Mode (Plan C)
+// ============================================================================
+
+void PagePanel::setSelectMode(bool enabled)
+{
+    if (m_selectMode == enabled) {
+        return;
+    }
+    m_selectMode = enabled;
+
+    if (enabled) {
+        // Multi-select; reorder drag would fight rubber-band/range selection.
+        m_listView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        m_listView->setDragDropMode(QAbstractItemView::NoDragDrop);
+        m_listView->setDragEnabled(false);
+    } else {
+        m_listView->setSelectionMode(QAbstractItemView::SingleSelection);
+        m_listView->setDragEnabled(true);
+        m_listView->setDragDropMode(QAbstractItemView::InternalMove);
+        m_listView->setDefaultDropAction(Qt::MoveAction);
+    }
+
+    m_listView->clearSelection();
+
+    if (m_delegate) {
+        m_delegate->setSelectMode(enabled);
+    }
+    if (m_selectionHeader) {
+        m_selectionHeader->setVisible(enabled);
+    }
+
+    updateSelectionHeader();
+    m_listView->viewport()->update();
+
+    emit selectModeChanged(enabled);
+}
+
+void PagePanel::clearSelectionAfterDelete()
+{
+    if (m_listView) {
+        m_listView->clearSelection();
+    }
+    updateSelectionHeader();
+}
+
+void PagePanel::onSelectionChanged()
+{
+    updateSelectionHeader();
+    emit selectionCountChanged(selectedRows().size());
+}
+
+QList<int> PagePanel::selectedRows() const
+{
+    QList<int> rows;
+    if (!m_listView || !m_listView->selectionModel()) {
+        return rows;
+    }
+    const QModelIndexList indexes = m_listView->selectionModel()->selectedIndexes();
+    for (const QModelIndex& idx : indexes) {
+        if (idx.isValid()) {
+            rows.append(idx.row());
+        }
+    }
+    std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    return rows;
+}
+
+void PagePanel::updateSelectionHeader()
+{
+    if (!m_selectionCountLabel) {
+        return;
+    }
+    const int count = selectedRows().size();
+    m_selectionCountLabel->setText(tr("%1 selected").arg(count));
+    if (m_deleteButton) {
+        m_deleteButton->setEnabled(count > 0);
+    }
+    if (m_clearButton) {
+        m_clearButton->setEnabled(count > 0);
+    }
+}
+
+void PagePanel::openRangeDialog()
+{
+    if (!m_document) {
+        return;
+    }
+    const int pageCount = m_document->pageCount();
+    if (pageCount <= 0) {
+        return;
+    }
+
+    PageRangeSelectDialog dialog(pageCount, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    QItemSelectionModel* sel = m_listView->selectionModel();
+    if (!sel) {
+        return;
+    }
+    const QList<int> indices = dialog.selectedIndices();
+    for (int row : indices) {
+        if (row >= 0 && row < pageCount) {
+            const QModelIndex idx = m_model->index(row, 0);
+            if (idx.isValid()) {
+                sel->select(idx, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -387,6 +567,18 @@ void PagePanel::onPageCountChanged()
 void PagePanel::onItemClicked(const QModelIndex& index)
 {
     if (!index.isValid()) {
+        return;
+    }
+    
+    // Select mode: clicks manage the selection, they do not navigate.
+    // Mouse/stylus selection is handled natively by ExtendedSelection; touch
+    // taps (which the list view turns into clicked() rather than a native
+    // selection) are toggled here so touch users can build a selection.
+    if (m_selectMode) {
+        if (m_listView->wasLastPressTouch() && m_listView->selectionModel()) {
+            m_listView->selectionModel()->select(
+                index, QItemSelectionModel::Toggle | QItemSelectionModel::Rows);
+        }
         return;
     }
     

@@ -35,6 +35,13 @@ public:
      */
     QPoint lastPressPosition() const { return m_pressPos; }
     
+    /**
+     * @brief Whether the last press that produced a click came from touch input.
+     * Used by PagePanel to decide whether to toggle selection on a tap in
+     * select mode (touch), versus deferring to native ExtendedSelection (mouse).
+     */
+    bool wasLastPressTouch() const { return m_isTouchInput; }
+    
 signals:
     /**
      * @brief Emitted when a drag should start for the given index.
