@@ -326,8 +326,8 @@ private:
      * @return true if successful
      */
     bool writeOutline(const QVector<int>& exportedPages);
-    // Note: writeOutlineRecursive is a static helper in MuPdfExporter.cpp
-    // (uses fz_outline which cannot be forward-declared)
+    // Note: buildAggregatedOutline is a static helper in MuPdfExporter.cpp; it
+    // renders Document::aggregatedOutline() into the output PDF's bookmark tree.
     
     // ===== Finalization =====
     
