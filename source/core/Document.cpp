@@ -754,13 +754,19 @@ int Document::notebookPageIndexForSourcePage(const QString& sourceId, int origin
     if (originalPage < 0) {
         return -1;
     }
-    // Match live Page fields (runtime-import safe). Matching by (source, original
-    // page number) rather than position means partial/reordered imports resolve
-    // correctly; a destination not present in this document returns -1 (no-op).
-    for (int i = 0; i < pageCount(); ++i) {
-        const Page* p = page(i);
-        if (p && p->pdfPageNumber == originalPage && p->pdfSourceId == sourceId) {
-            return i;
+    // Resolve via the manifest maps (kept in sync on insert/import/remove and keyed
+    // by page uuid) plus the O(1) uuid->index cache, rather than page(i) which would
+    // force-load every page (and its images) from disk just to navigate one link.
+    // Matching by (source, original page number) means partial/reordered imports
+    // resolve correctly; a destination not present in this document returns -1.
+    for (const auto& [uuid, pdfIdx] : m_pagePdfIndex) {
+        if (pdfIdx != originalPage) {
+            continue;
+        }
+        auto srcIt = m_pagePdfSource.find(uuid);
+        const QString pageSrc = (srcIt != m_pagePdfSource.end()) ? srcIt->second : QString();
+        if (pageSrc == sourceId) {
+            return pageIndexByUuid(uuid);
         }
     }
     return -1;
