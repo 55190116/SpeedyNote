@@ -1318,6 +1318,13 @@ QString Document::ensureImportedPdfSourceId(Document* srcDoc, const QString& ori
     const QString hash = os->hash;
     const qint64 size = os->size;
 
+    // Broken/dismissed origin with neither identity nor path: nothing to
+    // reference. Leave the page unresolved (blank) rather than registering a
+    // junk empty source that would accumulate in pdf_sources on every import.
+    if (hash.isEmpty() && path.isEmpty()) {
+        return QString();
+    }
+
     QString destId;
     if (!hash.isEmpty()) {
         // registerSource dedups by hash+size, returning an existing id on match.
@@ -1375,11 +1382,11 @@ void Document::copyMarkdownNotes(Document* srcDoc, const QJsonObject& pageJson) 
         return;
     }
 
-    const QString srcNotes = srcDoc->notesPath();
-    const QString destNotes = notesPath();  // Creates assets/notes if missing.
-    if (srcNotes.isEmpty() || destNotes.isEmpty()) {
-        return;
-    }
+    // Resolve (and create) the note dirs lazily: only once a markdown slot with
+    // a real noteId is found. This keeps the common no-notes import from
+    // creating empty assets/notes dirs in either bundle (notesPath() mkpaths).
+    QString srcNotes;
+    QString destNotes;
 
     const QJsonArray objects = pageJson.value("objects").toArray();
     for (const QJsonValue& v : objects) {
@@ -1396,6 +1403,13 @@ void Document::copyMarkdownNotes(Document* srcDoc, const QJsonObject& pageJson) 
             const QString noteId = slot.value("noteId").toString();
             if (noteId.isEmpty()) {
                 continue;
+            }
+            if (destNotes.isEmpty()) {
+                srcNotes = srcDoc->notesPath();
+                destNotes = notesPath();  // Creates assets/notes if missing.
+                if (srcNotes.isEmpty() || destNotes.isEmpty()) {
+                    return;
+                }
             }
             const QString destFile = destNotes + "/" + noteId + ".md";
             if (QFile::exists(destFile)) {
@@ -1476,10 +1490,14 @@ PageImportResult Document::importPagesFrom(Document* srcDoc, const QStringList& 
     if (destIndex < 0) destIndex = 0;
     if (destIndex > maxIndex) destIndex = maxIndex;
 
-    // Validate + preserve order.
+    // Validate + preserve order, dropping duplicates: a repeated uuid would be
+    // assigned the same pre-seeded page uuid in pass 1 and then copied twice in
+    // pass 2, inserting two pages that share one uuid and corrupting page order.
     QStringList validUuids;
+    QSet<QString> seenUuids;
     for (const QString& u : srcPageUuids) {
-        if (srcDoc->pageIndexByUuid(u) >= 0) {
+        if (!seenUuids.contains(u) && srcDoc->pageIndexByUuid(u) >= 0) {
+            seenUuids.insert(u);
             validUuids.append(u);
         }
     }
