@@ -4386,8 +4386,6 @@ void MainWindow::copyPagesToOtherDocument(const QList<int>& srcRows)
 
     // Enumerate every other open, paged document across both panes.
     struct Candidate {
-        TabManager* tm = nullptr;
-        int tabIndex = -1;
         DocumentViewport* vp = nullptr;
         Document* doc = nullptr;
     };
@@ -4401,7 +4399,7 @@ void MainWindow::copyPagesToOtherDocument(const QList<int>& srcRows)
                 if (!doc || doc == srcDoc || doc->isEdgeless()) {
                     continue;
                 }
-                candidates.append({tm, i, vp, doc});
+                candidates.append({vp, doc});
                 nameCounts[doc->displayName()]++;
             }
         });

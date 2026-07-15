@@ -2662,14 +2662,32 @@ int DocumentViewport::dropInsertIndexAt(const QPointF& viewportPos, QLineF& outL
     };
 
     if (m_layoutMode == LayoutMode::SingleColumn) {
-        // Insertion index = number of pages whose vertical center is above docPt.
-        int index = 0;
-        for (int i = 0; i < pageCount; ++i) {
-            if (pageRect(i).center().y() <= docPt.y()) {
-                index = i + 1;
-            } else {
-                break;
+        // Binary search (O(log n)) for the last page whose top Y is at or above
+        // docPt.y(), mirroring pageAtPoint()'s approach for large PDFs. The
+        // insertion point is before that page if the point is in its upper half,
+        // otherwise after it.
+        int cand = -1;
+        if (!m_pageYCache.isEmpty()) {
+            int lo = 0, hi = pageCount - 1;
+            const qreal y = docPt.y();
+            while (lo <= hi) {
+                const int mid = (lo + hi) / 2;
+                if (m_pageYCache[mid] <= y) {
+                    cand = mid;
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
+                }
             }
+        }
+
+        int index;
+        if (cand < 0) {
+            index = 0;
+        } else if (docPt.y() <= pageRect(cand).center().y()) {
+            index = cand;
+        } else {
+            index = cand + 1;
         }
         index = qBound(0, index, pageCount);
 
