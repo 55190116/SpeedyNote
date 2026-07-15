@@ -15,12 +15,15 @@
 #include <QSplitter>
 #include <QHBoxLayout>
 #include <QVector>
+#include <QPointer>
 
 class TabBar;
 class TabManager;
 class Document;
 class DocumentViewport;
 class QStackedWidget;
+class ViewportScrollBar;
+class QTimer;
 
 class SplitViewManager : public QWidget {
     Q_OBJECT
@@ -116,6 +119,18 @@ public:
      */
     void updateTheme(bool darkMode, const QColor& accentColor);
 
+    // =========================================================================
+    // Enhanced scroll bars (Plan SB1)
+    // =========================================================================
+
+    /**
+     * @brief Pin the overlay scroll bars visible (disable proximity auto-hide).
+     *
+     * Persisted to QSettings; SB4's settings UI can flip this live.
+     */
+    void setScrollBarsPinned(bool pinned);
+    bool scrollBarsPinned() const { return m_scrollBarsPinned; }
+
 signals:
     void activeViewportChanged(DocumentViewport* viewport);
     void activePaneChanged(Pane pane);
@@ -147,6 +162,32 @@ private:
     void recenterAllViewports();
     bool eventFilter(QObject* watched, QEvent* event) override;
 
+    // --- Enhanced scroll bars (SB1) ---
+    struct PaneBars {
+        ViewportScrollBar* vBar = nullptr;   // page axis (vertical), docked left
+        ViewportScrollBar* hBar = nullptr;   // cross axis (horizontal), docked top
+        QTimer* fadeTimer = nullptr;
+        QPointer<DocumentViewport> bound;
+        QMetaObject::Connection cViewToV;
+        QMetaObject::Connection cViewToH;
+        QMetaObject::Connection cVToView;
+        QMetaObject::Connection cHToView;
+    };
+
+    QStackedWidget* stackForPane(Pane pane) const;
+    DocumentViewport* viewportForPane(Pane pane) const;
+    void createScrollBars(Pane pane);
+    void destroyScrollBars(Pane pane);
+    void repositionScrollBars(Pane pane);
+    void bindScrollBars(Pane pane, DocumentViewport* vp);
+    void refreshHandleSizes(Pane pane);
+    void showScrollBars(Pane pane);
+    void hideScrollBars(Pane pane);
+    void applyScrollBarDarkMode();
+    void proximityFloatCheck(QEvent* event);
+    void checkPaneProximity(Pane pane, const QPointF& globalPos);
+    static bool defaultScrollBarsPinned();
+
     // Left pane (always exists)
     TabBar* m_leftTabBar = nullptr;
     QStackedWidget* m_leftViewportStack = nullptr;
@@ -167,4 +208,8 @@ private:
     // Cached theme for applying to newly created panes
     bool m_darkMode = false;
     QColor m_accentColor;
+
+    // Enhanced scroll bars (SB1), indexed by Pane (Left=0, Right=1)
+    PaneBars m_paneBars[2];
+    bool m_scrollBarsPinned = true;
 };

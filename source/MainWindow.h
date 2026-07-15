@@ -367,10 +367,6 @@ private slots:
     // Keyboard Shortcut Hub: Handle shortcut changes from ShortcutManager
     void onShortcutChanged(const QString& actionId, const QString& newShortcut);
 
-    void updatePanX(int value);
-    void updatePanY(int value);
-
-
     void forceUIRefresh();
 
 
@@ -616,9 +612,6 @@ private:
     QMenu *overflowMenu;
     QAction* m_relinkPdfAction = nullptr;  // Phase R.4: Relink PDF menu action
     QAction* m_exportPdfAction = nullptr;  // Phase 8: Export to PDF menu action
-    QScrollBar *panXSlider;
-    QScrollBar *panYSlider;
-
 
     // QListWidget *tabList;          // Horizontal tab bar
     // QStackedWidget *canvasStack;   // Holds multiple InkCanvas instances
@@ -732,18 +725,6 @@ private:
 
     void loadUserSettings();
 
-    bool scrollbarsVisible = false;
-    QTimer *scrollbarHideTimer = nullptr;
-    bool m_hasKeyboard = false;  // MW5.8: Cached keyboard detection result
-    
-    // MW5.8: Keyboard detection and scrollbar visibility
-    bool hasPhysicalKeyboard();   // Check if physical keyboard is connected
-    void showScrollbars();        // Show scrollbars and reset hide timer
-    void hideScrollbars();        // Hide scrollbars
-    
-    // Phase 3.3: Viewport scroll signal connections (for proper cleanup)
-    QMetaObject::Connection m_hScrollConn;
-    QMetaObject::Connection m_vScrollConn;
     QPointer<DocumentViewport> m_connectedViewport;  // QPointer for safe dangling check
     
     // CR-2B: Tool/mode signal connections (for keyboard shortcut sync)

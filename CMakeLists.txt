@@ -893,6 +893,7 @@ set(UI_SOURCES
     source/ui/widgets/LayerPanelPillButton.cpp
     source/ui/widgets/PdfSearchBar.cpp
     source/ui/widgets/ExpandableToolButton.cpp
+    source/ui/widgets/ViewportScrollBar.cpp
     # Subtoolbars
     source/ui/subtoolbars/SubToolbar.cpp
     
