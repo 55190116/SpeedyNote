@@ -118,6 +118,8 @@ struct PdfSource {
     QString bundledFile;        ///< Relative path of the bundled mini-PDF (when bundled)
     QHash<int,int> pageMap;     ///< Original PDF page -> bundled-file page (when bundled)
     bool needsRelink = false;   ///< True when the source file could not be located on load
+    bool primary = false;       ///< True for the document's own base PDF (never bundled/minified,
+                                ///< mirrored to legacy pdf_path). Imported sources are non-primary.
 };
 
 // ============================================================================
@@ -878,6 +880,13 @@ public:
      * @return True if the primary source has a path, even if not currently loaded.
      */
     bool hasPdfReference() const { const PdfSource* s = primarySource(); return s && !s->path.isEmpty(); }
+
+    /**
+     * @brief Whether the document references any PDF source at all (primary or
+     *        imported). True for import-only documents that have no primary PDF.
+     * @return True if at least one PDF source is registered.
+     */
+    bool hasAnyPdfSource() const { return !m_pdfSources.empty(); }
     
     /**
      * @brief Check if the primary PDF is currently loaded and valid.
@@ -1711,10 +1720,18 @@ private:
     mutable std::map<QString, std::unique_ptr<PdfProvider>> m_pdfProviders;
 
     // ===== Private PDF source helpers =====
-    /// The primary source (index 0), or nullptr if the document has no PDF.
-    PdfSource* primarySource() { return m_pdfSources.empty() ? nullptr : &m_pdfSources.front(); }
-    const PdfSource* primarySource() const { return m_pdfSources.empty() ? nullptr : &m_pdfSources.front(); }
-    /// Ensure a primary source exists (index 0), creating one with a fresh id if needed.
+    /// The primary source (the document's own base PDF, flagged primary), or nullptr
+    /// if the document has no primary PDF. NOTE: this is tracked by an explicit flag,
+    /// NOT by list position - imported sources are non-primary even at index 0.
+    PdfSource* primarySource() {
+        for (PdfSource& s : m_pdfSources) if (s.primary) return &s;
+        return nullptr;
+    }
+    const PdfSource* primarySource() const {
+        for (const PdfSource& s : m_pdfSources) if (s.primary) return &s;
+        return nullptr;
+    }
+    /// Ensure a primary source exists, creating one (flagged primary) if needed.
     PdfSource& ensurePrimarySource();
     /// The primary provider without lazy creation, or nullptr if not open.
     PdfProvider* primaryProvider() const {

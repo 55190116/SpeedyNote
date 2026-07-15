@@ -120,11 +120,17 @@ bool Document::pdfFileExists() const
 
 PdfSource& Document::ensurePrimarySource()
 {
-    if (m_pdfSources.empty()) {
-        PdfSource src;
-        src.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        m_pdfSources.push_back(src);
+    // Return the existing flagged primary if there is one.
+    for (PdfSource& s : m_pdfSources) {
+        if (s.primary) return s;
     }
+    // None yet: create a fresh primary at the front. Front placement keeps the
+    // legacy "primary first" convention for single-PDF documents; correctness no
+    // longer depends on position (primarySource() searches by the flag).
+    PdfSource src;
+    src.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    src.primary = true;
+    m_pdfSources.insert(m_pdfSources.begin(), src);
     return m_pdfSources.front();
 }
 
@@ -235,6 +241,7 @@ QString Document::registerSource(const QString& path, const QString& hash, qint6
     src.hash = hash;
     src.size = size;
     src.bundled = bundled;
+    src.primary = false;  // Registered (imported) sources are never the primary base PDF.
     m_pdfSources.push_back(src);
     return src.id;
 }
@@ -306,10 +313,8 @@ QStringList Document::unreferencedSourceIds() const
     }
 
     QStringList result;
-    for (size_t i = 0; i < m_pdfSources.size(); ++i) {
-        const PdfSource& s = m_pdfSources[i];
-        const bool isPrimary = (i == 0);
-        if (isPrimary) {
+    for (const PdfSource& s : m_pdfSources) {
+        if (s.primary) {
             if (!primaryReferenced) result.append(s.id);
         } else if (!referenced.contains(s.id)) {
             result.append(s.id);
@@ -1527,10 +1532,13 @@ QString Document::ensureImportedPdfSourceId(Document* srcDoc, const QString& ori
         }
     }
 
-    // A page mapped onto the primary (index 0) must carry an empty source id:
-    // unreferencedSourceIds() only counts empty-id pages as referencing the
-    // primary, so an explicit primary id would cause it to be pruned on save.
-    if (!m_pdfSources.empty() && m_pdfSources.front().id == destId) {
+    // A page that deduped onto the document's own base (primary) PDF must carry an
+    // empty source id: unreferencedSourceIds() only counts empty-id pages as
+    // referencing the primary, so an explicit primary id would cause it to be pruned
+    // on save. Imported sources are non-primary, so they keep their explicit id and
+    // get materialized into a mini-PDF rather than promoted to the main PDF.
+    const PdfSource* dst = pdfSourceById(destId);
+    if (dst && dst->primary) {
         return QString();
     }
     return destId;
@@ -2295,8 +2303,8 @@ QJsonObject Document::toJson() const
     obj["mode"] = modeToString(mode);
     
     // PDF reference (path only, provider is runtime).
-    // The primary source (index 0) is mirrored to the legacy top-level keys so that
-    // older builds can still open the document. When more than one source exists, the
+    // The primary source (flagged primary) is mirrored to the legacy top-level keys so
+    // that older builds can still open the document. When more than one source exists, the
     // full multi-source list is additionally written to pdf_sources[]. Single-PDF
     // documents therefore serialize byte-identically to the pre-multi-source format.
     if (const PdfSource* primary = primarySource()) {
@@ -2340,6 +2348,13 @@ QJsonObject Document::toJson() const
             sourcesArray.append(sObj);
         }
         obj["pdf_sources"] = sourcesArray;
+        // Authoritative primary marker: the id of the flagged primary source, or an
+        // empty string when the document has no primary (import-only). Its presence
+        // tells the loader that primary status is explicit (an empty value means
+        // "genuinely no primary", not "old format"). Absent only in pre-fix docs,
+        // where the loader falls back to treating the front source as primary.
+        const PdfSource* primary = primarySource();
+        obj["pdf_primary_id"] = primary ? primary->id : QString();
     }
     
     // State
@@ -2426,6 +2441,21 @@ std::unique_ptr<Document> Document::fromJson(const QJsonObject& obj)
             }
             doc->m_pdfSources.push_back(s);
         }
+
+        // Resolve which source is primary. pdf_primary_id is authoritative when
+        // present (empty value => genuinely no primary, e.g. an import-only doc).
+        // When the key is absent (docs written before the explicit-primary change),
+        // fall back to the historical convention that the front source is primary.
+        if (!doc->m_pdfSources.empty()) {
+            if (obj.contains("pdf_primary_id")) {
+                const QString primaryId = obj["pdf_primary_id"].toString();
+                for (PdfSource& s : doc->m_pdfSources) {
+                    s.primary = (!primaryId.isEmpty() && s.id == primaryId);
+                }
+            } else {
+                doc->m_pdfSources.front().primary = true;
+            }
+        }
     }
     if (doc->m_pdfSources.empty()) {
         // Legacy / single-PDF: synthesize the primary from top-level keys.
@@ -2440,13 +2470,14 @@ std::unique_ptr<Document> Document::fromJson(const QJsonObject& obj)
             s.relativePath = legacyRel;
             s.hash = legacyHash;
             s.size = legacySize;
+            s.primary = true;  // The document's own base PDF.
             doc->m_pdfSources.push_back(s);
         }
-    } else {
+    } else if (const PdfSource* p = doc->primarySource()) {
         // Ensure the primary picks up the legacy relative-path mirror if the array
         // entry omitted it (older multi-source writes).
-        if (doc->m_pdfSources.front().relativePath.isEmpty()) {
-            doc->m_pdfSources.front().relativePath = obj["pdf_relative_path"].toString();
+        if (p->relativePath.isEmpty()) {
+            const_cast<PdfSource*>(p)->relativePath = obj["pdf_relative_path"].toString();
         }
     }
     
@@ -4100,9 +4131,9 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
     
     // ========== RESOLVE & LOAD PDF SOURCES (Phase SHARE: Dual Path Resolution) ==========
     // Each source stores an absolute path and a bundle-relative path (portable .snbx),
-    // or a bundled file when materialized. The primary source (index 0) is opened
-    // eagerly (preserving today's fast path and isPdfLoaded() semantics); non-primary
-    // sources are opened lazily on first render via providerForSource().
+    // or a bundled file when materialized. The primary source (flagged primary) is
+    // opened eagerly (preserving today's fast path and isPdfLoaded() semantics);
+    // non-primary sources are opened lazily on first render via providerForSource().
     if (!doc->m_pdfSources.empty()) {
         QString bundleDir = QFileInfo(manifestPath).absolutePath();
 
@@ -4131,7 +4162,7 @@ std::unique_ptr<Document> Document::loadBundle(const QString& path)
 
         for (size_t i = 0; i < doc->m_pdfSources.size(); ++i) {
             PdfSource& s = doc->m_pdfSources[i];
-            const bool isPrimary = (i == 0);
+            const bool isPrimary = s.primary;
 
             const bool hasReference = !s.path.isEmpty() || !s.relativePath.isEmpty()
                                       || (s.bundled && !s.bundledFile.isEmpty());
