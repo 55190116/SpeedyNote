@@ -12,6 +12,8 @@
 #include <QSettings>
 #include <cmath>
 #include <algorithm>  // Phase 5.4: for std::sort, std::greater in merge
+#include <functional>
+#include <limits>
 
 #ifdef __GLIBC__
 #include <malloc.h>
@@ -833,6 +835,208 @@ QVector<PdfOutlineItem> Document::pdfOutline() const
         return QVector<PdfOutlineItem>();
     }
     return p->outline();
+}
+
+// -------------------------------------------------------------------------
+// OUT1: Multi-source outline aggregation + reusable source ordering/palette
+// -------------------------------------------------------------------------
+
+QStringList Document::sourceDisplayOrder() const
+{
+    QStringList order;
+    QSet<QString> seen;
+
+    // Primary always sorts first (represented by the empty id, matching page
+    // storage where primary-backed pages carry an empty pdfSourceId).
+    const bool hasPrimary = primarySource() != nullptr;
+    if (hasPrimary) {
+        order << QString();
+        seen.insert(QString());
+    }
+
+    // Remaining sources by first appearance in page order.
+    for (const QString& uuid : m_pageOrder) {
+        if (m_pagePdfIndex.find(uuid) == m_pagePdfIndex.end()) {
+            continue;  // not PDF-backed
+        }
+        auto it = m_pagePdfSource.find(uuid);
+        const QString src = (it != m_pagePdfSource.end()) ? it->second : QString();
+        if (src.isEmpty() && !hasPrimary) {
+            continue;  // stray empty binding with no primary source
+        }
+        if (!seen.contains(src)) {
+            seen.insert(src);
+            order << src;
+        }
+    }
+    return order;
+}
+
+int Document::paletteSlotForSource(const QString& sourceId) const
+{
+    return sourceDisplayOrder().indexOf(sourceId);
+}
+
+QString Document::sourceDisplayTitle(const QString& sourceId) const
+{
+    if (PdfProvider* p = providerForSource(sourceId)) {
+        const QString t = p->title().trimmed();
+        if (!t.isEmpty()) {
+            return t;
+        }
+    }
+    if (const PdfSource* s = pdfSourceById(sourceId)) {
+        const QString path = !s->path.isEmpty() ? s->path : s->relativePath;
+        if (!path.isEmpty()) {
+            const QString base = QFileInfo(path).completeBaseName();
+            if (!base.isEmpty()) {
+                return base;
+            }
+        }
+    }
+    const int slot = paletteSlotForSource(sourceId);
+    return QCoreApplication::translate("Document", "Source %1").arg(slot >= 0 ? slot + 1 : 1);
+}
+
+QVector<PdfOutlineItem> Document::aggregatedOutline() const
+{
+    const QStringList order = sourceDisplayOrder();
+    if (order.isEmpty()) {
+        return {};
+    }
+
+    // Collect the pruned/converted subtree for each contributing source.
+    QVector<QPair<QString, QVector<PdfOutlineItem>>> contributions;
+    for (const QString& src : order) {
+        PdfProvider* p = providerForSource(src);
+        if (!p || !p->isValid() || !p->hasOutline()) {
+            continue;
+        }
+        const QVector<PdfOutlineItem> raw = p->outline();
+        if (raw.isEmpty()) {
+            continue;
+        }
+
+        // ORIGINAL pages of this source currently present in the document (sorted).
+        QList<int> presentPages;
+        for (const auto& [uuid, pdfIdx] : m_pagePdfIndex) {
+            auto it = m_pagePdfSource.find(uuid);
+            const QString pageSrc = (it != m_pagePdfSource.end()) ? it->second : QString();
+            if (pageSrc == src) {
+                presentPages.append(pdfIdx);
+            }
+        }
+        if (presentPages.isEmpty()) {
+            continue;  // none of this source's pages are in the document
+        }
+        std::sort(presentPages.begin(), presentPages.end());
+        presentPages.erase(std::unique(presentPages.begin(), presentPages.end()),
+                           presentPages.end());
+
+        // All outline target pages (ORIGINAL space, sorted) so each entry's
+        // covered page span is [target, nextTarget) - standard TOC semantics.
+        QList<int> targets;
+        std::function<void(const QVector<PdfOutlineItem>&)> gatherTargets =
+            [&](const QVector<PdfOutlineItem>& items) {
+                for (const PdfOutlineItem& it : items) {
+                    if (it.targetPage >= 0) {
+                        const int o = originalPageForProviderIndex(src, it.targetPage);
+                        if (o >= 0) targets.append(o);
+                    }
+                    if (!it.children.isEmpty()) gatherTargets(it.children);
+                }
+            };
+        gatherTargets(raw);
+        std::sort(targets.begin(), targets.end());
+        targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
+
+        auto isPresent = [&](int orig) -> bool {
+            return orig >= 0 &&
+                   std::binary_search(presentPages.begin(), presentPages.end(), orig);
+        };
+        auto coverageEnd = [&](int t) -> int {
+            auto it = std::upper_bound(targets.begin(), targets.end(), t);
+            return (it == targets.end()) ? std::numeric_limits<int>::max() : *it;
+        };
+        // Page this entry should navigate to: its exact target if imported, else the
+        // first imported page within its covered span; -1 when nothing is present
+        // (an inert header / greyed context entry).
+        auto resolveNav = [&](int origTarget) -> int {
+            if (origTarget < 0) return -1;
+            if (isPresent(origTarget)) return origTarget;
+            auto it = std::lower_bound(presentPages.begin(), presentPages.end(), origTarget);
+            if (it != presentPages.end() && *it < coverageEnd(origTarget)) return *it;
+            return -1;
+        };
+        auto navOf = [&](const PdfOutlineItem& it) -> int {
+            return resolveNav(it.targetPage >= 0 ? originalPageForProviderIndex(src, it.targetPage) : -1);
+        };
+        // reaches: this entry resolves to a present page, or a descendant does.
+        std::function<bool(const PdfOutlineItem&)> reaches =
+            [&](const PdfOutlineItem& it) -> bool {
+                if (navOf(it) >= 0) return true;
+                for (const PdfOutlineItem& c : it.children) {
+                    if (reaches(c)) return true;
+                }
+                return false;
+            };
+        // Unified prune + grey (Q13.6): keep a subtree that reaches a present page;
+        // also keep an unresolved LEAF among present siblings (greyed context);
+        // prune whole absent subtrees. Entries that reach a present page navigate
+        // there (targetPage = resolved page); unresolved kept entries keep their
+        // original target so computeUnavailableOutlinePages() greys them inert.
+        std::function<QVector<PdfOutlineItem>(const QVector<PdfOutlineItem>&)> build =
+            [&](const QVector<PdfOutlineItem>& items) -> QVector<PdfOutlineItem> {
+                bool levelActive = false;
+                for (const PdfOutlineItem& it : items) {
+                    if (reaches(it)) { levelActive = true; break; }
+                }
+                QVector<PdfOutlineItem> out;
+                for (const PdfOutlineItem& it : items) {
+                    const bool itemReaches = reaches(it);
+                    const bool keepAsContext = !itemReaches && it.children.isEmpty() && levelActive;
+                    if (!itemReaches && !keepAsContext) {
+                        continue;  // prune whole absent subtree
+                    }
+                    PdfOutlineItem copy = it;
+                    copy.sourceId = src;
+                    const int nav = navOf(it);
+                    copy.targetPage = (nav >= 0)
+                        ? nav
+                        : (it.targetPage >= 0 ? originalPageForProviderIndex(src, it.targetPage) : -1);
+                    copy.children = itemReaches ? build(it.children) : QVector<PdfOutlineItem>();
+                    out.append(copy);
+                }
+                return out;
+            };
+
+        QVector<PdfOutlineItem> tree = build(raw);
+        if (!tree.isEmpty()) {
+            contributions.append({src, std::move(tree)});
+        }
+    }
+
+    if (contributions.isEmpty()) {
+        return {};
+    }
+    // Single contributor: no synthetic root, identical to the legacy single-PDF
+    // panel. Multiple contributors: wrap each under a titled, non-navigable root.
+    if (contributions.size() == 1) {
+        return contributions.first().second;
+    }
+
+    QVector<PdfOutlineItem> result;
+    result.reserve(contributions.size());
+    for (auto& [src, tree] : contributions) {
+        PdfOutlineItem root;
+        root.title = sourceDisplayTitle(src);
+        root.targetPage = -1;   // header, not navigable
+        root.sourceId = src;
+        root.isOpen = true;
+        root.children = std::move(tree);
+        result.append(std::move(root));
+    }
+    return result;
 }
 
 // =========================================================================

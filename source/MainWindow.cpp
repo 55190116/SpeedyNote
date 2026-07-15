@@ -2902,21 +2902,23 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
                 if (!doc) return;
                 
                 int notebookPage = viewport->currentPageIndex();
-                int pdfPage = doc->pdfPageIndexForNotebookPage(notebookPage);
-                
-                // Only highlight if current page is a PDF page
-                // For inserted blank pages, keep the previous highlight
-                if (pdfPage >= 0) {
-                    outlinePanel->highlightPage(pdfPage);
+                // OUT1: resolve the page's own source + ORIGINAL page so highlight
+                // scopes to the right source (works without a primary PDF).
+                QString srcId;
+                int origPage = -1;
+                if (doc->pdfBindingForNotebookPage(notebookPage, srcId, origPage)) {
+                    outlinePanel->highlightPage(srcId, origPage);
                 }
+                // For inserted blank pages, keep the previous highlight.
             });
             
             // Sync current page state immediately
             Document* doc = viewport->document();
             if (doc) {
-                int pdfPage = doc->pdfPageIndexForNotebookPage(viewport->currentPageIndex());
-                if (pdfPage >= 0) {
-                    outlinePanel->highlightPage(pdfPage);
+                QString srcId;
+                int origPage = -1;
+                if (doc->pdfBindingForNotebookPage(viewport->currentPageIndex(), srcId, origPage)) {
+                    outlinePanel->highlightPage(srcId, origPage);
                 }
             }
         }
@@ -2989,8 +2991,14 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
         // Refresh page panel + action bar.
         notifyPageStructureChanged(doc, newPage);
 
-        // Re-grey outline entries whose PDF target may now be present/absent.
-        refreshOutlineAvailability(doc);
+        // OUT1: undo/redo of a cross-document import can add/remove a PDF source,
+        // so rebuild the outline (source roots appear/disappear) when this doc owns
+        // the panel; a plain delete/reorder only needs cheap re-greying.
+        if (currentViewport() && currentViewport()->document() == doc) {
+            updateOutlinePanelForDocument(doc);
+        } else {
+            refreshOutlineAvailability(doc);
+        }
 
         // Mark the owning tab modified.
         if (m_splitViewManager) {
@@ -3616,71 +3624,78 @@ void MainWindow::updateOutlinePanelForDocument(Document* doc)
     if (!outlinePanel) {
         return;
     }
-    
-    // Case 1: No document or not a PDF document
-    if (!doc || !doc->isPdfLoaded()) {
+
+    // OUT1: aggregate the outline across every contributing PDF source (primary
+    // and imported). Works with or without a primary PDF.
+    if (!doc) {
         m_leftSidebar->showOutlineTab(false);
         outlinePanel->clearOutline();
         return;
     }
-    
-    // Case 2: PDF document but no outline
-    const PdfProvider* pdf = doc->pdfProvider();
-    if (!pdf || !pdf->hasOutline()) {
+
+    QVector<PdfOutlineItem> outline = doc->aggregatedOutline();
+    if (outline.isEmpty()) {
         m_leftSidebar->showOutlineTab(false);
         outlinePanel->clearOutline();
         return;
     }
-    
-    // Case 3: PDF with outline - show tab and load data
-    QVector<PdfOutlineItem> outline = pdf->outline();
-    outlinePanel->setOutline(outline, computeUnavailableOutlinePages(doc));
+
+    // Build the sourceId -> palette-slot map, but only when more than one source
+    // contributes so single-source outlines draw no accent chip (Q13.3).
+    QHash<QString, int> sourceSlots;
+    const QStringList order = doc->sourceDisplayOrder();
+    QSet<QString> contributing;
+    std::function<void(const QVector<PdfOutlineItem>&)> collect =
+        [&](const QVector<PdfOutlineItem>& items) {
+            for (const PdfOutlineItem& it : items) {
+                contributing.insert(it.sourceId);
+                if (!it.children.isEmpty()) collect(it.children);
+            }
+        };
+    collect(outline);
+    if (contributing.size() > 1) {
+        for (const QString& src : order) {
+            sourceSlots.insert(src, doc->paletteSlotForSource(src));
+        }
+    }
+
+    outlinePanel->setOutline(outline, sourceSlots, computeUnavailableOutlinePages(doc));
     m_leftSidebar->showOutlineTab(true);
     
 #ifdef SPEEDYNOTE_DEBUG
-    qDebug() << "Phase E.2: Loaded outline with" << outline.size() << "top-level items";
+    qDebug() << "OUT1: Loaded aggregated outline with" << outline.size()
+             << "top-level items from" << contributing.size() << "source(s)";
 #endif
 }
 
-QSet<int> MainWindow::computeUnavailableOutlinePages(Document* doc) const
+QSet<QString> MainWindow::computeUnavailableOutlinePages(Document* doc) const
 {
-    // Plan A2: an outline entry is "unavailable" (greyed/inert) when its target
-    // PDF page is no longer present in the notebook (deleted). Only primary-source
-    // PDF pages participate in outline navigation, so notebookPageIndexForPdfPage
-    // returning -1 means the page is gone.
-    QSet<int> unavailable;
-    if (!doc || !doc->isPdfLoaded()) {
-        return unavailable;
-    }
-    const PdfProvider* pdf = doc->pdfProvider();
-    if (!pdf || !pdf->hasOutline()) {
+    // OUT1: an outline entry is "unavailable" (greyed/inert) when its target
+    // (sourceId, ORIGINAL page) is no longer present in the notebook. Keys are
+    // OutlinePanel::keyFor(sourceId, originalPage).
+    QSet<QString> unavailable;
+    if (!doc) {
         return unavailable;
     }
 
-    // Build the set of primary-source PDF pages currently present in the notebook
-    // once (O(pages)), then test each outline target against it (O(1) each),
-    // instead of an O(pages) lookup per outline entry.
-    QSet<int> presentPdfPages;
-    const int pageCount = doc->pageCount();
-    for (int i = 0; i < pageCount; ++i) {
-        const int pdfPage = doc->pdfPageIndexForNotebookPage(i);
-        if (pdfPage >= 0) {
-            presentPdfPages.insert(pdfPage);
-        }
+    const QVector<PdfOutlineItem> outline = doc->aggregatedOutline();
+    if (outline.isEmpty()) {
+        return unavailable;
     }
 
     std::function<void(const QVector<PdfOutlineItem>&)> walk =
         [&](const QVector<PdfOutlineItem>& items) {
             for (const PdfOutlineItem& item : items) {
-                if (item.targetPage >= 0 && !presentPdfPages.contains(item.targetPage)) {
-                    unavailable.insert(item.targetPage);
+                if (item.targetPage >= 0 &&
+                    doc->notebookPageIndexForSourcePage(item.sourceId, item.targetPage) < 0) {
+                    unavailable.insert(OutlinePanel::keyFor(item.sourceId, item.targetPage));
                 }
                 if (!item.children.isEmpty()) {
                     walk(item.children);
                 }
             }
         };
-    walk(pdf->outline());
+    walk(outline);
     return unavailable;
 }
 
@@ -4501,7 +4516,14 @@ void MainWindow::refreshDestinationAfterImport(DocumentViewport* destVp, int des
 
     destVp->notifyDocumentStructureChanged();
     destVp->scrollToPage(qBound(0, destIndex, qMax(0, destDoc->pageCount() - 1)));
-    refreshOutlineAvailability(destDoc);
+    // OUT1: a cross-document import can add a new PDF source, so fully rebuild the
+    // outline (new source roots appear) when the destination owns the panel;
+    // otherwise a tab/viewport switch rebuilds it on activation.
+    if (currentViewport() && currentViewport()->document() == destDoc) {
+        updateOutlinePanelForDocument(destDoc);
+    } else {
+        refreshOutlineAvailability(destDoc);
+    }
 
     // Mark the owning tab modified (in whichever pane it lives).
     if (m_splitViewManager) {
@@ -7748,20 +7770,20 @@ void MainWindow::setupOutlinePanelConnections()
         return;
     }
     
-    // Navigation: OutlinePanel → DocumentViewport
-    // Note: pageIndex from outline is a PDF page index, not notebook page index
-    // When pages are inserted between PDF pages, these differ
+    // Navigation: OutlinePanel → DocumentViewport (OUT1, source-aware).
+    // The entry carries its source id and an ORIGINAL PDF page; resolve to the
+    // notebook page that shows that source page (correct for partial/reordered
+    // imports and documents without a primary PDF).
     connect(outlinePanel, &OutlinePanel::navigationRequested,
-            this, [this](int pdfPageIndex, QPointF position) {
+            this, [this](const QString& sourceId, int originalPage, QPointF position) {
         if (DocumentViewport* vp = currentViewport()) {
             Document* doc = vp->document();
             if (!doc) return;
-            
-            // Convert PDF page index to notebook page index
-            int notebookPageIndex = doc->notebookPageIndexForPdfPage(pdfPageIndex);
+
+            int notebookPageIndex = doc->notebookPageIndexForSourcePage(sourceId, originalPage);
             if (notebookPageIndex < 0) {
-                qWarning() << "Outline navigation: PDF page" << pdfPageIndex 
-                           << "not found in notebook";
+                qWarning() << "Outline navigation: source" << sourceId
+                           << "page" << originalPage << "not found in notebook";
                 return;
             }
             

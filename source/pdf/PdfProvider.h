@@ -96,6 +96,16 @@ struct PdfOutlineItem {
     
     bool isOpen = false;                    ///< Whether item is expanded by default
     QVector<PdfOutlineItem> children;       ///< Child items
+
+    /**
+     * @brief Owning PDF source id (OUT1 multi-source outline).
+     *
+     * Empty for a raw provider outline; populated only by
+     * Document::aggregatedOutline() so navigation/availability can resolve the
+     * entry against the correct source. Empty also denotes the primary source.
+     * When set, @ref targetPage is stored in the source's ORIGINAL page space.
+     */
+    QString sourceId;
 };
 
 /**

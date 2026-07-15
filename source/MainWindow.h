@@ -385,7 +385,7 @@ private slots:
     void centerViewportContent(int tabIndex);  // Phase 3.3: One-time horizontal centering
     void updateLayerPanelForViewport(DocumentViewport* viewport);  // Phase 5.1: Update LayerPanel
     void updateOutlinePanelForDocument(Document* doc);  // Phase E.2: Update OutlinePanel for document
-    QSet<int> computeUnavailableOutlinePages(Document* doc) const;  // Plan A2: PDF outline targets absent from notebook
+    QSet<QString> computeUnavailableOutlinePages(Document* doc) const;  // OUT1: keyFor(sourceId, originalPage) of absent outline targets
     void refreshOutlineAvailability(Document* doc);  // Plan A2: re-grey outline entries after structure change
     void updatePagePanelForViewport(DocumentViewport* viewport);  // Page Panel: Task 5.1: Update PagePanel
     void notifyPageStructureChanged(Document* doc, int currentPage = -1);  // Helper: Update PagePanel after page add/remove

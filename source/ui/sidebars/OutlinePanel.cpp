@@ -68,13 +68,21 @@ void OutlinePanel::setupUi()
 // Outline Data
 // ============================================================================
 
+QString OutlinePanel::keyFor(const QString& sourceId, int originalPage)
+{
+    return sourceId + QChar('#') + QString::number(originalPage);
+}
+
 void OutlinePanel::setOutline(const QVector<PdfOutlineItem>& outline,
-                              const QSet<int>& unavailablePages)
+                              const QHash<QString, int>& sourceSlots,
+                              const QSet<QString>& unavailableKeys)
 {
     m_outline = outline;
-    m_unavailablePages = unavailablePages;
+    m_sourceSlots = sourceSlots;
+    m_unavailableKeys = unavailableKeys;
     m_tree->clear();
     m_lastHighlightedPage = -1;
+    m_lastHighlightSource.clear();
     
     // Clear previous document's expansion state
     // (State is per-document, not persistent across documents)
@@ -88,12 +96,12 @@ void OutlinePanel::setOutline(const QVector<PdfOutlineItem>& outline,
     populateTree(outline, nullptr);
 }
 
-void OutlinePanel::updateAvailability(const QSet<int>& unavailablePages)
+void OutlinePanel::updateAvailability(const QSet<QString>& unavailableKeys)
 {
-    if (m_unavailablePages == unavailablePages) {
+    if (m_unavailableKeys == unavailableKeys) {
         return;
     }
-    m_unavailablePages = unavailablePages;
+    m_unavailableKeys = unavailableKeys;
 
     // Refresh the flag on every existing item without rebuilding the tree
     // (preserves expansion + selection state).
@@ -101,7 +109,9 @@ void OutlinePanel::updateAvailability(const QSet<int>& unavailablePages)
     while (*it) {
         QTreeWidgetItem* item = *it;
         const int page = item->data(0, PageRole).toInt();
-        item->setData(0, UnavailableRole, m_unavailablePages.contains(page));
+        const QString src = item->data(0, SourceIdRole).toString();
+        item->setData(0, UnavailableRole,
+                      page >= 0 && m_unavailableKeys.contains(keyFor(src, page)));
         ++it;
     }
     m_tree->viewport()->update();
@@ -130,13 +140,19 @@ void OutlinePanel::populateTree(const QVector<PdfOutlineItem>& items, QTreeWidge
         treeItem->setText(0, item.title);
         treeItem->setToolTip(0, item.title);  // Full title on hover
 
-        // Store navigation data
+        // Store navigation data (targetPage is in ORIGINAL page space for the source)
         treeItem->setData(0, PageRole, item.targetPage);
         treeItem->setData(0, PositionXRole, item.targetPosition.x());
         treeItem->setData(0, PositionYRole, item.targetPosition.y());
 
-        // Plan A2: mark entries whose target PDF page is absent from the notebook.
-        treeItem->setData(0, UnavailableRole, m_unavailablePages.contains(item.targetPage));
+        // OUT1: owning source + its palette slot (-1 when single-source / no accent).
+        treeItem->setData(0, SourceIdRole, item.sourceId);
+        treeItem->setData(0, SourceSlotRole, m_sourceSlots.value(item.sourceId, -1));
+
+        // Plan A2 / OUT1: mark entries whose target PDF page is absent from the notebook.
+        treeItem->setData(0, UnavailableRole,
+                          item.targetPage >= 0 &&
+                          m_unavailableKeys.contains(keyFor(item.sourceId, item.targetPage)));
 
         // Apply default expansion from PDF
         applyDefaultExpansion(treeItem, item);
@@ -163,20 +179,21 @@ void OutlinePanel::applyDefaultExpansion(QTreeWidgetItem* item, const PdfOutline
 // Navigation Highlighting
 // ============================================================================
 
-void OutlinePanel::highlightPage(int pageIndex)
+void OutlinePanel::highlightPage(const QString& sourceId, int originalPage)
 {
-    if (m_outline.isEmpty() || pageIndex < 0) {
+    if (m_outline.isEmpty() || originalPage < 0) {
         return;
     }
 
-    // Only update if page changed
-    if (pageIndex == m_lastHighlightedPage) {
+    // Only update if the (source, page) changed
+    if (originalPage == m_lastHighlightedPage && sourceId == m_lastHighlightSource) {
         return;
     }
-    m_lastHighlightedPage = pageIndex;
+    m_lastHighlightedPage = originalPage;
+    m_lastHighlightSource = sourceId;
 
-    // Find best matching item (floor match: highest page <= current)
-    QTreeWidgetItem* bestMatch = findItemForPage(pageIndex);
+    // Find best matching item (floor match within the same source)
+    QTreeWidgetItem* bestMatch = findItemForPage(sourceId, originalPage);
 
     if (bestMatch) {
         // Block signals to prevent triggering navigation
@@ -202,19 +219,21 @@ void OutlinePanel::highlightPage(int pageIndex)
     }
 }
 
-QTreeWidgetItem* OutlinePanel::findItemForPage(int pageIndex)
+QTreeWidgetItem* OutlinePanel::findItemForPage(const QString& sourceId, int originalPage)
 {
     QTreeWidgetItem* bestMatch = nullptr;
     int bestMatchPage = -1;
 
-    // Iterate through all items
+    // Iterate through all items; floor-match scoped to the current page's source.
     QTreeWidgetItemIterator it(m_tree);
     while (*it) {
         QTreeWidgetItem* item = *it;
         int itemPage = item->data(0, PageRole).toInt();
+        const QString itemSource = item->data(0, SourceIdRole).toString();
 
-        // Floor match: find highest page <= current
-        if (itemPage >= 0 && itemPage <= pageIndex && itemPage > bestMatchPage) {
+        // Floor match: highest page <= current, within the same source.
+        if (itemSource == sourceId && itemPage >= 0 &&
+            itemPage <= originalPage && itemPage > bestMatchPage) {
             bestMatch = item;
             bestMatchPage = itemPage;
         }
@@ -242,6 +261,7 @@ void OutlinePanel::onItemClicked(QTreeWidgetItem* item, int column)
 
     int pageIndex = item->data(0, PageRole).toInt();
     if (pageIndex < 0) {
+        // OUT1: synthetic source-root headers are not navigable.
         return;
     }
 
@@ -255,8 +275,9 @@ void OutlinePanel::onItemClicked(QTreeWidgetItem* item, int column)
     qreal posY = item->data(0, PositionYRole).toReal();
     QPointF position(posX, posY);
 
-    // Emit navigation request
-    emit navigationRequested(pageIndex, position);
+    // Emit navigation request (source-aware; pageIndex is in ORIGINAL page space)
+    const QString sourceId = item->data(0, SourceIdRole).toString();
+    emit navigationRequested(sourceId, pageIndex, position);
 }
 
 void OutlinePanel::onItemExpanded(QTreeWidgetItem* item)

@@ -49,6 +49,20 @@ QColor invertColorLightness(const QColor& color);
  */
 QColor darkenColorForExport(const QColor& color);
 
+/**
+ * @brief Neutral gray accent for a PDF source group (OUT1 multi-source outline).
+ * @param slot     Zero-based source display slot (see Document::paletteSlotForSource).
+ *                 Negative values return an invalid QColor (no accent).
+ * @param darkMode True for the dark-theme palette.
+ * @return An ordered, theme-appropriate gray shade; cycles when @p slot exceeds
+ *         the palette size so any number of sources still gets a distinct-ish tint.
+ *
+ * Used to draw the leading chip / subtle row tint that visually distinguishes
+ * outline entries by their originating PDF. The future enhanced scroll bar
+ * (Plan SB1) reuses the same slot assignment.
+ */
+QColor sourceShade(int slot, bool darkMode);
+
 } // namespace DarkModeUtils
 
 #endif // DARKMODEUTILS_H

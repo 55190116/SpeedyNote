@@ -1315,6 +1315,46 @@ public:
      * @return Vector of outline items, or empty if not available.
      */
     QVector<PdfOutlineItem> pdfOutline() const;
+
+    /**
+     * @brief Merged outline across all contributing PDF sources (OUT1).
+     * @return One tree with each contributing source's outline as a subtree.
+     *
+     * For every source in sourceDisplayOrder() that exposes an outline, its
+     * native outline is deep-copied with each entry's targetPage converted from
+     * provider space to the source's ORIGINAL page (via originalPageForProviderIndex)
+     * and tagged with sourceId. Empty subtrees (reaching no page present in this
+     * document) are pruned; a source contributing nothing is dropped entirely.
+     * When more than one source contributes, each is wrapped under a synthetic,
+     * non-navigable root titled by sourceDisplayTitle(); with a single contributor
+     * the root is suppressed so single-PDF documents look exactly as before.
+     */
+    QVector<PdfOutlineItem> aggregatedOutline() const;
+
+    /**
+     * @brief Ordered list of PDF source ids for display/accent assignment (OUT1).
+     * @return Primary source id first (if a primary exists), then remaining
+     *         source ids by first appearance in page order.
+     *
+     * This is the reusable "document map" seed: the outline panel maps a source's
+     * slot to a gray shade and the future scroll bar (SB1) maps the same slot to
+     * a color accent, so a source is recognizably the same slot in both.
+     */
+    QStringList sourceDisplayOrder() const;
+
+    /**
+     * @brief Palette slot (0-based index in sourceDisplayOrder()) for a source.
+     * @param sourceId Source id (empty = primary).
+     * @return Slot index, or -1 if the source is unknown.
+     */
+    int paletteSlotForSource(const QString& sourceId) const;
+
+    /**
+     * @brief Human-readable title for a PDF source (OUT1 outline root label).
+     * @param sourceId Source id (empty = primary).
+     * @return Embedded PDF title, else the file base name, else "Source N".
+     */
+    QString sourceDisplayTitle(const QString& sourceId) const;
     
     // =========================================================================
     // Page Management (Task 1.2.5)
