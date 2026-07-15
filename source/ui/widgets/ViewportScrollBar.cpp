@@ -22,9 +22,9 @@ ViewportScrollBar::ViewportScrollBar(Qt::Orientation orientation,
     setMouseTracking(true);
     setCursor(Qt::ArrowCursor);
     if (isVertical()) {
-        setFixedWidth(barThickness());
+        setFixedWidth(barThickness(orientation));
     } else {
-        setFixedHeight(barThickness());
+        setFixedHeight(barThickness(orientation));
     }
 }
 
@@ -80,6 +80,30 @@ void ViewportScrollBar::setMarkers(const QVector<BarMarker>& markers)
     }
     m_markers = markers;
     update();
+}
+
+void ViewportScrollBar::setThumbnailStrip(const QPixmap& strip)
+{
+    // Thumbnail strip is a page-axis concept; ignore on horizontal bars.
+    if (!isVertical()) {
+        if (!m_thumbStrip.isNull()) { m_thumbStrip = QPixmap(); update(); }
+        return;
+    }
+    m_thumbStrip = strip;
+    update();
+}
+
+QSize ViewportScrollBar::trackContentPixelSize() const
+{
+    const qreal len = trackLength();
+    const qreal w = (isVertical() ? width() : height()) - 2.0 * trackMargin();
+    if (len <= 0.0 || w <= 0.0) return QSize();
+    const qreal dpr = devicePixelRatioF();
+    // Vertical bars: strip is (track width) x (track length). The controller
+    // fills it along the page axis; SB4 can swap axes for horizontal bars.
+    const int pxW = qMax(1, qRound(w * dpr));
+    const int pxH = qMax(1, qRound(len * dpr));
+    return isVertical() ? QSize(pxW, pxH) : QSize(pxH, pxW);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,12 +192,6 @@ QColor ViewportScrollBar::legibleMarkerColor(const QColor& raw) const
 // Theming
 // ---------------------------------------------------------------------------
 
-QColor ViewportScrollBar::trackColor() const
-{
-    return m_darkMode ? QColor(255, 255, 255, 24)
-                      : QColor(0, 0, 0, 26);
-}
-
 QColor ViewportScrollBar::handleColor() const
 {
     const bool active = m_dragging || m_handleHovered;
@@ -190,25 +208,31 @@ QColor ViewportScrollBar::handleColor() const
 void ViewportScrollBar::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing, true);
+    // Square, crisp edges (no rounding); keep pixmap scaling smooth so the
+    // thumbnail ribbon isn't jagged.
+    p.setRenderHint(QPainter::Antialiasing, false);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
     p.setPen(Qt::NoPen);
 
-    // Lane layout (reserved for later plans):
-    //   - background/track (drawn here in SB1)
-    //   - source-accent stripe + thumbnail strip (SB2/SB3, behind the handle)
-    //   - marker ticks (SB2, above the strip)
-    //   - the drag handle (drawn here, floats above all lanes)
+    // Solid, opaque background -- perfectly black (dark) or white (light), just
+    // like the app's sub-toolbars. This is also the "filler" the thumbnail
+    // ribbon shows between pages when the strip is transparent.
+    const QColor bg = m_darkMode ? QColor(0, 0, 0) : QColor(255, 255, 255);
+    p.fillRect(rect(), bg);
 
-    // Track background spanning the full minor axis (same rect for either
-    // orientation; only the rounding axis differs).
+    // Content rect (small inset from the widget edge) hosting the ribbon/handle.
     const QRectF track(trackMargin(), trackMargin(),
                        width() - 2.0 * trackMargin(),
                        height() - 2.0 * trackMargin());
-    const qreal trackRadius = (isVertical() ? track.width() : track.height()) / 2.0;
-    p.setBrush(trackColor());
-    p.drawRoundedRect(track, trackRadius, trackRadius);
 
-    // SB2: per-source accent stripes — a thin band on the docked (far) edge,
+    // SB3: low-res thumbnail filmstrip as the track background. Drawn at full
+    // opacity so it reads as a paper ribbon; transparent gaps between/around
+    // thumbnails reveal the solid bg as the black/white filler.
+    if (isVertical() && !m_thumbStrip.isNull()) {
+        p.drawPixmap(track, m_thumbStrip, m_thumbStrip.rect());
+    }
+
+    // SB2: per-source accent stripes -- a thin band on the docked (far) edge,
     // behind the handle. Vertical/page-axis only.
     if (isVertical() && !m_accents.isEmpty()) {
         const qreal stripeW = 3.0;
@@ -223,7 +247,7 @@ void ViewportScrollBar::paintEvent(QPaintEvent* /*event*/)
             QColor c = r.color;
             c.setAlpha(m_darkMode ? 190 : 170);
             p.setBrush(c);
-            p.drawRoundedRect(QRectF(stripeX, y0, stripeW, y1 - y0), 1.0, 1.0);
+            p.drawRect(QRectF(stripeX, y0, stripeW, y1 - y0));
         }
     }
 
@@ -239,9 +263,27 @@ void ViewportScrollBar::paintEvent(QPaintEvent* /*event*/)
         } else {
             handle = QRectF(start, inset, len, qMax(0.0, height() - 2.0 * inset));
         }
-        const qreal handleRadius = (isVertical() ? handle.width() : handle.height()) / 2.0;
-        p.setBrush(handleColor());
-        p.drawRoundedRect(handle, handleRadius, handleRadius);
+        const bool active = m_dragging || m_handleHovered;
+
+        if (isVertical() && !m_thumbStrip.isNull()) {
+            // Hollow, high-contrast frame so the thumbnail ribbon shows through,
+            // like a paper ribbon threaded past a bracket. High-contrast edge =
+            // pure white on the black bg / pure black on the white bg.
+            const QColor edge = m_darkMode ? QColor(255, 255, 255) : QColor(0, 0, 0);
+            const qreal bw = active ? 3.0 : 2.0;
+            QPen pen(edge, bw);
+            pen.setJoinStyle(Qt::MiterJoin);
+            p.setPen(pen);
+            // Faint fill only while grabbed so the ribbon stays readable.
+            p.setBrush(active ? QColor(edge.red(), edge.green(), edge.blue(), 36)
+                              : QBrush(Qt::NoBrush));
+            p.drawRect(handle.adjusted(bw / 2.0, bw / 2.0, -bw / 2.0, -bw / 2.0));
+            p.setPen(Qt::NoPen);
+        } else {
+            // No ribbon (horizontal bar / edgeless): plain solid square handle.
+            p.setBrush(handleColor());
+            p.drawRect(handle);
+        }
     }
 
     // SB2: marker ticks on top of the handle so they stay visible. Thin,
@@ -254,7 +296,7 @@ void ViewportScrollBar::paintEvent(QPaintEvent* /*event*/)
         for (const BarMarker& m : m_markers) {
             const qreal y = fractionToPx(m.pos) - tickH / 2.0;
             p.setBrush(legibleMarkerColor(m.color));
-            p.drawRoundedRect(QRectF(tickX, y, tickW, tickH), 1.0, 1.0);
+            p.drawRect(QRectF(tickX, y, tickW, tickH));
         }
     }
 }

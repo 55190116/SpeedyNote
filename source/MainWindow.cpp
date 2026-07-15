@@ -3462,6 +3462,8 @@ void MainWindow::updateOutlinePanelForDocument(Document* doc)
     // depends on the same source registry / structure this refresh reflects.
     if (m_splitViewManager) {
         m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
+        // SB3: the same structure change also invalidates the thumbnail strip.
+        m_splitViewManager->rebuildScrollBarThumbnails(currentViewport());
     }
 
     if (!m_leftSidebar) {
@@ -3636,6 +3638,8 @@ void MainWindow::notifyPageStructureChanged(Document* doc, int currentPage)
     // SB2: page add/remove/reorder shifts accent runs and marker positions.
     if (m_splitViewManager) {
         m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
+        // SB3: page structure changes re-lay the whole thumbnail strip.
+        m_splitViewManager->rebuildScrollBarThumbnails(currentViewport());
     }
 }
 
@@ -4410,6 +4414,8 @@ void MainWindow::refreshDestinationAfterImport(DocumentViewport* destVp, int des
     // lives in the inactive pane.
     if (m_splitViewManager) {
         m_splitViewManager->updateScrollBarDocumentMap(destVp);
+        // SB3: imported pages add new slices, so rebuild the strip too.
+        m_splitViewManager->rebuildScrollBarThumbnails(destVp);
     }
 }
 
