@@ -7,6 +7,7 @@
 #include "Document.h"
 #include "../objects/OcrTextObject.h"
 #include "../objects/LinkObject.h"
+#include "../pdf/PdfMaterializer.h"
 #include <QCryptographicHash>
 #include <QSettings>
 #include <cmath>
@@ -149,11 +150,28 @@ PdfSource* Document::pdfSourceById(const QString& sourceId)
     return nullptr;
 }
 
+// Whether a source can be served from its ORIGINAL external PDF (present on disk).
+// When true, the provider opens the full PDF and original page numbers are valid
+// verbatim; when false, a bundled source falls back to its compact mini-PDF (which
+// only holds referenced pages, remapped through pageMap). pdfPathForSource() and
+// resolveSourcePageIndex() must agree on this so the opened file and the page index
+// passed to it stay consistent.
+static bool sourceUsesOriginalFile(const PdfSource* s)
+{
+    return s && !s->path.isEmpty() && QFileInfo::exists(s->path);
+}
+
 QString Document::pdfPathForSource(const QString& sourceId) const
 {
     const PdfSource* s = pdfSourceById(sourceId);
     if (!s) return QString();
-    // A bundled source is opened from its bundled file inside the .snb.
+    // Prefer the original external PDF whenever it is present: full fidelity, every
+    // original page number is valid, and no page-map translation is required. The
+    // bundled mini-PDF is only a portability fallback (e.g. the .snb was moved
+    // away from its source PDFs).
+    if (sourceUsesOriginalFile(s)) {
+        return s->path;
+    }
     if (s->bundled && !s->bundledFile.isEmpty() && !m_bundlePath.isEmpty()) {
         return QDir(m_bundlePath).absoluteFilePath(s->bundledFile);
     }
@@ -309,9 +327,17 @@ int Document::pruneUnreferencedSources()
 
     QSet<QString> staleSet(stale.begin(), stale.end());
 
-    // Close cached providers for the sources being removed.
+    // Close cached providers for the sources being removed, and delete any bundled
+    // mini-PDF file on disk (Plan B2) so the bundle doesn't keep orphaned PDFs.
     for (const QString& id : stale) {
         m_pdfProviders.erase(id);
+        const PdfSource* s = pdfSourceById(id);
+        if (s && s->bundled && !s->bundledFile.isEmpty() && !m_bundlePath.isEmpty()) {
+            const QString abs = QDir(m_bundlePath).absoluteFilePath(s->bundledFile);
+            if (QFile::exists(abs)) {
+                QFile::remove(abs);
+            }
+        }
     }
 
     // Erase the sources from the registry. toJson() will re-derive the legacy
@@ -324,6 +350,121 @@ int Document::pruneUnreferencedSources()
 
     markModified();
     return stale.size();
+}
+
+int Document::resolveSourcePageIndex(const QString& sourceId, int originalPage) const
+{
+    const PdfSource* s = pdfSourceById(sourceId);
+    if (!s) {
+        return originalPage;
+    }
+    // Consistent with pdfPathForSource(): when the original PDF is present the
+    // provider opens it and the original page number is used verbatim. Only when we
+    // fall back to a bundled mini-PDF do we remap through the compact page map.
+    if (sourceUsesOriginalFile(s) || !s->bundled) {
+        return originalPage;
+    }
+    auto it = s->pageMap.constFind(originalPage);
+    return (it != s->pageMap.constEnd()) ? it.value() : -1;
+}
+
+bool Document::needsMaterialization() const
+{
+    if (m_bundlePath.isEmpty()) {
+        return false;
+    }
+    // Collect referenced (sourceId -> original pages) from live pages, skipping
+    // the primary source (empty id), which always stays external.
+    for (int i = 0; i < pageCount(); ++i) {
+        const Page* p = page(i);
+        if (!p || p->pdfPageNumber < 0 || p->pdfSourceId.isEmpty()) {
+            continue;
+        }
+        const PdfSource* s = pdfSourceById(p->pdfSourceId);
+        if (!s) {
+            continue;
+        }
+        // A referenced page not present in the (bundled) source's page map means
+        // there is un-bundled imported content to materialize.
+        if (!s->bundled || !s->pageMap.contains(p->pdfPageNumber)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int Document::materializeSources(QString* errorOut)
+{
+    if (m_bundlePath.isEmpty()) {
+        return 0;
+    }
+
+    // Build sourceId -> set of referenced original page numbers (skip primary).
+    std::map<QString, QList<int>> refs;
+    for (int i = 0; i < pageCount(); ++i) {
+        const Page* p = page(i);
+        if (!p || p->pdfPageNumber < 0 || p->pdfSourceId.isEmpty()) {
+            continue;
+        }
+        refs[p->pdfSourceId].append(p->pdfPageNumber);
+    }
+    if (refs.empty()) {
+        return 0;
+    }
+
+    const QString pdfsDir = QDir(m_bundlePath).absoluteFilePath(QStringLiteral("pdfs"));
+    int materialized = 0;
+
+    for (auto& [sourceId, pages] : refs) {
+        PdfSource* s = pdfSourceById(sourceId);
+        if (!s) {
+            continue;
+        }
+        // Skip sources that already have every referenced page bundled.
+        bool anyMissing = !s->bundled;
+        if (s->bundled) {
+            for (int pg : pages) {
+                if (!s->pageMap.contains(pg)) { anyMissing = true; break; }
+            }
+        }
+        if (!anyMissing) {
+            continue;
+        }
+
+        if (!QDir().mkpath(pdfsDir)) {
+            if (errorOut) *errorOut = QStringLiteral("Could not create bundle pdfs directory");
+            continue;
+        }
+
+        const QString relFile = QStringLiteral("pdfs/src-%1.pdf").arg(s->id);
+        const QString absFile = QDir(m_bundlePath).absoluteFilePath(relFile);
+
+        // Origin: prefer the original full PDF; fall back to the existing bundled
+        // mini-PDF (keep-only, when the original is gone).
+        QString originPath = s->path;
+        if (originPath.isEmpty() || !QFileInfo::exists(originPath)) {
+            originPath = s->bundled ? absFile : QString();
+        }
+
+        // Release any cached provider before we overwrite the mini-PDF file.
+        m_pdfProviders.erase(s->id);
+
+        QString err;
+        if (PdfMaterializer::materialize(originPath, absFile, pages, s->pageMap, &err)) {
+            if (!s->pageMap.isEmpty()) {
+                s->bundled = true;
+                s->bundledFile = relFile;
+                markModified();
+                ++materialized;
+            }
+        } else if (errorOut && !err.isEmpty()) {
+            *errorOut = err;
+        }
+        // Drop the provider again so the next open uses the (now bundled) file.
+        m_pdfProviders.erase(s->id);
+    }
+
+    return materialized;
 }
 
 QString Document::computePdfHash(const QString& path)
@@ -466,7 +607,12 @@ QImage Document::renderPdfPageToImage(const QString& sourceId, int pageIndex, qr
     if (!provider || !provider->isValid()) {
         return QImage();
     }
-    return provider->renderPageToImage(pageIndex, dpi);
+    // pageIndex is the ORIGINAL page number; a bundled source needs its mini-PDF index.
+    const int providerPage = resolveSourcePageIndex(sourceId, pageIndex);
+    if (providerPage < 0) {
+        return QImage();
+    }
+    return provider->renderPageToImage(providerPage, dpi);
 }
 
 QPixmap Document::renderPdfPageToPixmap(int pageIndex, qreal dpi) const
@@ -489,7 +635,11 @@ QVector<QRect> Document::pdfImageRegions(const QString& sourceId, int pageIndex,
     if (!provider || !provider->isValid()) {
         return {};
     }
-    return provider->imageRegions(pageIndex, dpi);
+    const int providerPage = resolveSourcePageIndex(sourceId, pageIndex);
+    if (providerPage < 0) {
+        return {};
+    }
+    return provider->imageRegions(providerPage, dpi);
 }
 
 void Document::trimPdfStore() const
@@ -527,7 +677,11 @@ QSizeF Document::pdfPageSize(const QString& sourceId, int pageIndex) const
     if (!provider || !provider->isValid()) {
         return QSizeF();
     }
-    return provider->pageSize(pageIndex);
+    const int providerPage = resolveSourcePageIndex(sourceId, pageIndex);
+    if (providerPage < 0) {
+        return QSizeF();
+    }
+    return provider->pageSize(providerPage);
 }
 
 int Document::notebookPageIndexForPdfPage(int pdfPageIndex) const
@@ -574,6 +728,27 @@ int Document::pdfPageIndexForNotebookPage(int notebookPageIndex) const
     }
     
     return -1;  // Not a PDF page (blank or custom background)
+}
+
+bool Document::pdfBindingForNotebookPage(int notebookPageIndex, QString& outSourceId, int& outPdfPage) const
+{
+    // Read live Page fields so this is correct even for pages imported at runtime
+    // (D1/D2), whose (sourceId, pdfPageNumber) may not yet be mirrored into the
+    // manifest maps. Empty sourceId means the document's primary source.
+    const Page* p = page(notebookPageIndex);
+    if (!p || p->pdfPageNumber < 0) {
+        return false;
+    }
+    outSourceId = p->pdfSourceId;
+    outPdfPage = p->pdfPageNumber;
+    return true;
+}
+
+void Document::ensureAllPdfProvidersLoaded() const
+{
+    for (const PdfSource& s : m_pdfSources) {
+        providerForSource(s.id);  // Opens + caches (or marks needsRelink); ignore result.
+    }
 }
 
 QString Document::pdfTitle() const
@@ -777,8 +952,11 @@ bool Document::loadPageFromDisk(int index) const
             if (sizeIt != m_pageMetadata.end()) {
                 page->size = sizeIt->second;
             } else {
-                // Fallback to PDF page size if available (from the page's own source)
-                if (pdfIt->second >= 0 && pdfIt->second < pdfPageCount(pageSourceId)) {
+                // Fallback to PDF page size if available (from the page's own source).
+                // Bounds-check against the provider using the resolved (mini-PDF) index,
+                // since bundled sources remap the original page number.
+                const int providerPage = resolveSourcePageIndex(pageSourceId, pdfIt->second);
+                if (providerPage >= 0 && providerPage < pdfPageCount(pageSourceId)) {
                     QSizeF pdfSize = pdfPageSize(pageSourceId, pdfIt->second);
                     qreal scale = 96.0 / 72.0;  // PDF points to 96 dpi
                     page->size = QSizeF(pdfSize.width() * scale, pdfSize.height() * scale);
@@ -1314,7 +1492,13 @@ QString Document::ensureImportedPdfSourceId(Document* srcDoc, const QString& ori
         return QString();  // Origin source unresolved; page stays blank.
     }
 
-    const QString path = srcDoc->pdfPathForSource(originSourceId);
+    // Reference the origin's ORIGINAL external PDF, never its bundled mini-PDF:
+    // imported pages keep their original page numbers, so pointing at a compact
+    // mini-PDF (a subset, re-indexed) would make them render out of range. Identity
+    // (hash+size) still dedups against a matching full PDF already in this document
+    // (e.g. the destination's own copy), and if no local file exists the page shows
+    // a relink prompt instead of looping on an unrenderable reference.
+    const QString path = os->path;
     const QString hash = os->hash;
     const qint64 size = os->size;
 
@@ -3364,7 +3548,7 @@ QVector<LinkOutlineEntry> Document::enumerateLinkOutline() const
     return isEdgeless() ? flatten(m_tileOutline) : flatten(m_pageOutline);
 }
 
-bool Document::saveBundle(const QString& path)
+bool Document::saveBundle(const QString& path, bool finalize)
 {
     // Save old bundle path before overwriting - needed for copying evicted tiles/pages
     QString oldBundlePath = m_bundlePath;
@@ -3400,6 +3584,15 @@ bool Document::saveBundle(const QString& path)
     // Done before the relative-path refresh and toJson() below so the serialized
     // pdf_sources[] and legacy pdf_path mirror reflect only live sources.
     pruneUnreferencedSources();
+
+    // Plan B2 (Q12.1 Option D): on finalize (document close / .snbx export), graft
+    // each non-primary imported source's referenced pages into a bundled mini-PDF so
+    // the bundle is self-contained. Done before the relative-path refresh and toJson()
+    // so the serialized pdf_sources[] carry bundled/bundled_file/page_map. Ordinary
+    // saves/autosaves pass finalize=false and skip this entirely.
+    if (finalize) {
+        materializeSources();
+    }
     
     // Refresh each PDF source's relative path against the bundle location so the
     // serialized pdf_sources[]/pdf_relative_path reflect the current save target.

@@ -946,6 +946,7 @@ set(PDF_SOURCES
     source/pdf/PdfMismatchDialog.cpp
     source/pdf/PdfSearchEngine.cpp
     source/pdf/MuPdfExporter.cpp
+    source/pdf/PdfMaterializer.cpp
 )
 message(STATUS "   PDF provider: MuPDF (all platforms)")
 

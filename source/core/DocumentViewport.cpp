@@ -3997,7 +3997,9 @@ void DocumentViewport::doAsyncPdfPreload()
     
     // Collect (sourceId, pdfPageNum) pairs that need preloading, resolving each page
     // to its own PDF source so multi-source documents preload the correct backgrounds.
-    struct PreloadItem { QString sourceId; int pdfPageNum; QString path; };
+    // renderPageNum is the index the provider actually uses: for a bundled source it
+    // is the compact mini-PDF index (via pageMap); otherwise it equals pdfPageNum.
+    struct PreloadItem { QString sourceId; int pdfPageNum; int renderPageNum; QString path; };
     QList<PreloadItem> pagesToPreload;
     {
         QMutexLocker locker(&m_pdfCacheMutex);
@@ -4025,7 +4027,11 @@ void DocumentViewport::doAsyncPdfPreload()
             if (path.isEmpty()) {
                 continue;  // Source unavailable (will render placeholder synchronously)
             }
-            pagesToPreload.append({ sourceId, pdfPageNum, path });
+            const int renderPageNum = m_document->resolveSourcePageIndex(sourceId, pdfPageNum);
+            if (renderPageNum < 0) {
+                continue;  // Bundled source without this page mapped
+            }
+            pagesToPreload.append({ sourceId, pdfPageNum, renderPageNum, path });
         }
     }
     
@@ -4037,6 +4043,7 @@ void DocumentViewport::doAsyncPdfPreload()
     for (const PreloadItem& item : pagesToPreload) {
         const QString sourceId = item.sourceId;
         const int pdfPageNum = item.pdfPageNum;
+        const int renderPageNum = item.renderPageNum;
         const QString pdfPath = item.path;
         QFutureWatcher<QImage>* watcher = new QFutureWatcher<QImage>(this);
         
@@ -4124,7 +4131,7 @@ void DocumentViewport::doAsyncPdfPreload()
         // Background thread: render PDF to QImage (thread-safe)
         // NOTE: QImage is explicitly documented as thread-safe for read operations
         // and can be safely passed between threads.
-        QFuture<QImage> future = QtConcurrent::run([pdfPageNum, dpi, pdfPath]() -> QImage {
+        QFuture<QImage> future = QtConcurrent::run([renderPageNum, dpi, pdfPath]() -> QImage {
             // Use thread-local cached PDF provider to avoid re-opening the PDF
             // for every page render. Each thread pool worker caches its own provider
             // (keyed by resolved source path).
@@ -4134,7 +4141,7 @@ void DocumentViewport::doAsyncPdfPreload()
                 return QImage();  // Return null image on failure
             }
             
-            QImage result = threadPdf->renderPageToImage(pdfPageNum, dpi);
+            QImage result = threadPdf->renderPageToImage(renderPageNum, dpi);
             threadPdf->trimStore();
             return result;
         });
@@ -14124,7 +14131,12 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
             // Render PDF page from cache (Task 1.3.6), resolving the page's own source.
             if (page->pdfPageNumber >= 0) {
                 PdfProvider* prov = m_document->providerForSource(page->pdfSourceId);
-                if (prov && prov->isValid()) {
+                // Skip pages whose original number can't be served by the resolved
+                // provider (e.g. a bundled source without the original PDF where the
+                // page isn't in the mini-PDF's page map). Rendering would return null
+                // and, since nulls aren't cached, retry on every repaint. Draw blank.
+                const int resolvedPage = m_document->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
+                if (prov && prov->isValid() && resolvedPage >= 0 && resolvedPage < prov->pageCount()) {
                     qreal dpi = effectivePdfDpi();
                     QPixmap pdfPixmap = getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
                     

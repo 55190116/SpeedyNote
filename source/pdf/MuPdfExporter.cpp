@@ -771,26 +771,36 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
         if (!currentPage) {
             qWarning() << "[MuPdfExporter] Failed to get page" << pageIndex;
             pageSuccess = false;
-        } else if (isPageModified(pageIndex)) {
-            // Page has annotations - need to render
-            if (currentPage->pdfPageNumber >= 0 && m_sourcePdf) {
-                // Modified page with PDF background
-                pageSuccess = renderModifiedPage(pageIndex);
+        } else {
+            // Point the active-source aliases at THIS page's own PDF source so that
+            // graft/render/import operate on the correct source (multi-source docs).
+            QString srcId;
+            int pdfPage = -1;
+            if (m_document->pdfBindingForNotebookPage(pageIndex, srcId, pdfPage)) {
+                activateSource(srcId);
+            }
+
+            if (isPageModified(pageIndex)) {
+                // Page has annotations - need to render
+                if (currentPage->pdfPageNumber >= 0 && m_sourcePdf) {
+                    // Modified page with PDF background
+                    pageSuccess = renderModifiedPage(pageIndex);
+                } else {
+                    // No PDF background (blank notebook page)
+                    pageSuccess = renderBlankPage(pageIndex);
+                }
+            } else if (m_sourcePdf && currentPage->pdfPageNumber >= 0) {
+                // Unmodified page with PDF
+                if (m_options.darkModeBackground) {
+                    // Dark mode export requires color rewriting, can't byte-copy
+                    pageSuccess = renderModifiedPage(pageIndex);
+                } else {
+                    pageSuccess = graftPage(pageIndex);
+                }
             } else {
-                // No PDF background (blank notebook page)
+                // Unmodified blank page - still need to render
                 pageSuccess = renderBlankPage(pageIndex);
             }
-        } else if (m_sourcePdf && currentPage->pdfPageNumber >= 0) {
-            // Unmodified page with PDF
-            if (m_options.darkModeBackground) {
-                // Dark mode export requires color rewriting, can't byte-copy
-                pageSuccess = renderModifiedPage(pageIndex);
-            } else {
-                pageSuccess = graftPage(pageIndex);
-            }
-        } else {
-            // Unmodified blank page - still need to render
-            pageSuccess = renderBlankPage(pageIndex);
         }
         
         if (!pageSuccess) {
@@ -804,6 +814,10 @@ PdfExportResult MuPdfExporter::exportPdf(const PdfExportOptions& options)
         result.pagesExported++;
     }
     
+    // Metadata and outline are taken from the PRIMARY source; re-activate it since
+    // the page loop may have left another source active.
+    activateSource(QString());
+
     // Write metadata
     if (options.preserveMetadata && !writeMetadata()) {
         qWarning() << "[MuPdfExporter] Failed to write metadata (non-fatal)";
@@ -997,22 +1011,28 @@ bool MuPdfExporter::initContext()
 
 void MuPdfExporter::cleanup()
 {
-    // Drop graft map first (it references both documents)
-    if (m_graftMap) {
-        pdf_drop_graft_map(m_ctx, m_graftMap);
-        m_graftMap = nullptr;
+    // Drop every cached source's handles. Graft maps reference both documents, so
+    // drop them before the source documents. m_sourcePdf aliases m_sourceDoc, so the
+    // source is dropped once via its fz_document handle.
+    for (auto& entry : m_sources) {
+        SourceHandles& sh = entry.second;
+        if (sh.graft) {
+            pdf_drop_graft_map(m_ctx, sh.graft);
+            sh.graft = nullptr;
+        }
+        if (sh.doc) {
+            fz_drop_document(m_ctx, sh.doc);
+            sh.doc = nullptr;
+            sh.pdf = nullptr;
+        }
     }
-    
-    if (m_sourcePdf) {
-        // Note: m_sourcePdf and m_sourceDoc point to the same document
-        // Only drop once via the fz_document handle
-    }
-    
-    if (m_sourceDoc) {
-        fz_drop_document(m_ctx, m_sourceDoc);
-        m_sourceDoc = nullptr;
-        m_sourcePdf = nullptr;
-    }
+    m_sources.clear();
+    m_currentSourceId.clear();
+
+    // Active-source aliases are non-owning; just clear them.
+    m_sourceDoc = nullptr;
+    m_sourcePdf = nullptr;
+    m_graftMap = nullptr;
     
     if (m_outputDoc) {
         pdf_drop_document(m_ctx, m_outputDoc);
@@ -1029,11 +1049,13 @@ bool MuPdfExporter::openSourcePdf()
 {
     if (!m_document) return true;
     
-    QString pdfPath = m_document->pdfPath();
+    QString pdfPath = m_document->pdfPath();  // primary source path
     if (pdfPath.isEmpty()) {
-        // No source PDF - this is fine for blank notebooks
+        // No primary source - this is fine for blank notebooks. Cache an empty entry
+        // so activateSource("") is a cheap no-op.
+        m_sources[QString()] = SourceHandles{};
         #ifdef SPEEDYNOTE_DEBUG
-        qDebug() << "[MuPdfExporter] No source PDF (blank document)";
+        qDebug() << "[MuPdfExporter] No primary source PDF (blank document)";
         #endif
         return true;
     }
@@ -1045,44 +1067,113 @@ bool MuPdfExporter::openSourcePdf()
     }
     
     QByteArray pathUtf8 = pdfPath.toUtf8();
+    SourceHandles sh;
     
     fz_try(m_ctx) {
-        m_sourceDoc = fz_open_document(m_ctx, pathUtf8.constData());
+        sh.doc = fz_open_document(m_ctx, pathUtf8.constData());
         
         // Check for password-protected PDF
-        if (fz_needs_password(m_ctx, m_sourceDoc)) {
+        if (fz_needs_password(m_ctx, sh.doc)) {
             qWarning() << "[MuPdfExporter] Source PDF is password-protected";
-            fz_drop_document(m_ctx, m_sourceDoc);
-            m_sourceDoc = nullptr;
+            fz_drop_document(m_ctx, sh.doc);
+            sh.doc = nullptr;
             m_lastError = tr("Cannot export password-protected PDF.\nPlease remove the password and try again.");
             return false;
         }
         
         // Verify it's a PDF (for grafting capabilities)
-        m_sourcePdf = pdf_document_from_fz_document(m_ctx, m_sourceDoc);
-        if (!m_sourcePdf) {
+        sh.pdf = pdf_document_from_fz_document(m_ctx, sh.doc);
+        if (!sh.pdf) {
             qWarning() << "[MuPdfExporter] Source is not a PDF document";
-            fz_drop_document(m_ctx, m_sourceDoc);
-            m_sourceDoc = nullptr;
+            fz_drop_document(m_ctx, sh.doc);
+            sh.doc = nullptr;
             m_lastError = tr("Source file is not a valid PDF document.");
             return false;
         }
         
         // Create graft map for efficient multi-page grafting
         // This ensures shared resources (fonts, images) are only copied once
-        m_graftMap = pdf_new_graft_map(m_ctx, m_outputDoc);
+        sh.graft = pdf_new_graft_map(m_ctx, m_outputDoc);
     }
     fz_catch(m_ctx) {
+        // sh was not stored yet; drop whatever opened to avoid a leak.
+        if (sh.doc) { fz_drop_document(m_ctx, sh.doc); sh.doc = nullptr; sh.pdf = nullptr; }
         qWarning() << "[MuPdfExporter] Failed to open source PDF:" << fz_caught_message(m_ctx);
         m_lastError = tr("Failed to open source PDF: %1").arg(QString::fromUtf8(fz_caught_message(m_ctx)));
         return false;
     }
     
+    m_sources[QString()] = sh;
+    activateSource(QString());  // make primary the active source
+    
     #ifdef SPEEDYNOTE_DEBUG
-    qDebug() << "[MuPdfExporter] Opened source PDF:" << pdfPath
-             << "with" << fz_count_pages(m_ctx, m_sourceDoc) << "pages";
+    qDebug() << "[MuPdfExporter] Opened primary source PDF:" << pdfPath
+             << "with" << fz_count_pages(m_ctx, sh.doc) << "pages";
     #endif
     return true;
+}
+
+MuPdfExporter::SourceHandles* MuPdfExporter::sourceHandlesFor(const QString& sourceId)
+{
+    auto it = m_sources.find(sourceId);
+    if (it != m_sources.end()) {
+        return &it->second;
+    }
+    
+    // Open (and cache) on first use. Failures cache a null-handle entry so we don't
+    // retry every page and so callers fall back to blank rendering.
+    SourceHandles sh;
+    if (m_ctx && m_outputDoc && m_document) {
+        QString path = m_document->pdfPathForSource(sourceId);
+        if (!path.isEmpty() && QFile::exists(path)) {
+            QByteArray pathUtf8 = path.toUtf8();
+            fz_document* doc = nullptr;
+            fz_var(doc);
+            fz_try(m_ctx) {
+                doc = fz_open_document(m_ctx, pathUtf8.constData());
+                if (!fz_needs_password(m_ctx, doc)) {
+                    pdf_document* pdf = pdf_document_from_fz_document(m_ctx, doc);
+                    if (pdf) {
+                        // Only commit to sh after the graft map is created, so a throw
+                        // here leaves ownership with the local `doc` (dropped below).
+                        pdf_graft_map* graft = pdf_new_graft_map(m_ctx, m_outputDoc);
+                        sh.doc = doc;
+                        sh.pdf = pdf;
+                        sh.graft = graft;
+                        doc = nullptr;  // ownership transferred to sh
+                    }
+                }
+            }
+            fz_catch(m_ctx) {
+                qWarning() << "[MuPdfExporter] Failed to open source" << sourceId
+                           << ":" << fz_caught_message(m_ctx);
+            }
+            if (doc) {
+                // Not adopted (password, not-a-PDF, or graft failure) - drop it.
+                fz_drop_document(m_ctx, doc);
+            }
+        } else if (!path.isEmpty()) {
+            qWarning() << "[MuPdfExporter] Source file missing for" << sourceId << ":" << path;
+        }
+    }
+    
+    auto res = m_sources.emplace(sourceId, sh);
+    return &res.first->second;
+}
+
+void MuPdfExporter::activateSource(const QString& sourceId)
+{
+    m_currentSourceId = sourceId;
+    SourceHandles* sh = sourceHandlesFor(sourceId);
+    if (sh) {
+        m_sourceDoc = sh->doc;
+        m_sourcePdf = sh->pdf;
+        m_graftMap = sh->graft;
+    } else {
+        m_sourceDoc = nullptr;
+        m_sourcePdf = nullptr;
+        m_graftMap = nullptr;
+    }
 }
 
 // ============================================================================
@@ -1124,9 +1215,11 @@ bool MuPdfExporter::graftPage(int pageIndex)
     Page* page = m_document->page(pageIndex);
     if (!page) return false;
     
-    int pdfPageNum = page->pdfPageNumber;
+    // Translate the original page number to the active source's provider index
+    // (bundled mini-PDFs remap referenced pages via pageMap).
+    int pdfPageNum = m_document->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
     if (pdfPageNum < 0) {
-        qWarning() << "[MuPdfExporter] Page" << pageIndex << "has no PDF page number";
+        qWarning() << "[MuPdfExporter] Page" << pageIndex << "has no resolvable PDF page number";
         return false;
     }
     
@@ -1170,9 +1263,13 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
     Page* page = m_document->page(pageIndex);
     if (!page) return false;
     
-    // Get the source PDF page number for this SpeedyNote page
-    int pdfPageNum = page->pdfPageNumber;
-    if (pdfPageNum < 0 || !m_sourcePdf) {
+    // origPageNum: the ORIGINAL page number stored on the page (used for Document
+    // source-aware helpers, which translate to the provider index internally).
+    // pdfPageNum: the provider-facing index for direct MuPDF ops against m_sourcePdf
+    // (bundled mini-PDFs remap referenced pages via pageMap).
+    int origPageNum = page->pdfPageNumber;
+    int pdfPageNum = m_document->resolveSourcePageIndex(page->pdfSourceId, origPageNum);
+    if (origPageNum < 0 || pdfPageNum < 0 || !m_sourcePdf) {
         // No PDF background - use blank page rendering
         return renderBlankPage(pageIndex);
     }
@@ -1224,11 +1321,11 @@ bool MuPdfExporter::renderModifiedPage(int pageIndex)
         
         // Dark mode background: rasterize PDF page, invert, embed as image
         if (bgIsRasterDarkMode && m_sourceDoc) {
-            QImage bgImage = m_document->renderPdfPageToImage(pdfPageNum, static_cast<qreal>(m_options.dpi));
+            QImage bgImage = m_document->renderPdfPageToImage(m_currentSourceId, origPageNum, static_cast<qreal>(m_options.dpi));
             if (!bgImage.isNull()) {
                 QVector<QRect> imgRegions;
                 if (!m_options.skipImageMasking) {
-                    imgRegions = m_document->pdfImageRegions(pdfPageNum, static_cast<qreal>(m_options.dpi));
+                    imgRegions = m_document->pdfImageRegions(m_currentSourceId, origPageNum, static_cast<qreal>(m_options.dpi));
                 }
                 DarkModeUtils::invertImageLightness(bgImage, imgRegions);
 
@@ -2693,8 +2790,10 @@ bool MuPdfExporter::writeOutline(const QVector<int>& exportedPages)
     for (int exportIdx = 0; exportIdx < exportedPages.size(); ++exportIdx) {
         int docPageIdx = exportedPages[exportIdx];
         const Page* page = m_document->page(docPageIdx);
-        if (page && page->pdfPageNumber >= 0) {
-            // This document page is backed by a PDF page
+        // Only PRIMARY-source pages participate in the (primary) outline mapping.
+        // The outline is loaded from the primary source, so an imported page from
+        // another source that happens to share a pdfPageNumber must not claim an entry.
+        if (page && page->pdfPageNumber >= 0 && page->pdfSourceId.isEmpty()) {
             pdfToExportIndex[page->pdfPageNumber] = exportIdx;
         }
     }

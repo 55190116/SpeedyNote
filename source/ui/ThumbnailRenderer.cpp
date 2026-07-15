@@ -246,13 +246,18 @@ ThumbnailRenderer::ThumbnailSnapshot ThumbnailRenderer::createSnapshot(
     // so calling it from a worker is safe and keeps the main thread responsive.
     if (page->backgroundType == Page::BackgroundType::PDF && page->pdfPageNumber >= 0
         && doc->providerForSource(page->pdfSourceId)) {
-        snapshot.doc = doc;
-        snapshot.pdfPageNumber = page->pdfPageNumber;
-        snapshot.pdfSourceId = page->pdfSourceId;
-        snapshot.pdfSourcePath = doc->pdfPathForSource(page->pdfSourceId);
-        snapshot.pdfDarkMode = pdfDarkMode;
-        qreal pdfDpi = (thumbnailWidth * dpr) / (pageSize.width() / 72.0);
-        snapshot.pdfDpi = qMin(pdfDpi, 96.0);
+        // The worker renders directly against pdfSourcePath (the bundled mini-PDF when
+        // the source is bundled), so store the provider-facing index (pageMap-resolved).
+        const int renderPageNum = doc->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
+        if (renderPageNum >= 0) {
+            snapshot.doc = doc;
+            snapshot.pdfPageNumber = renderPageNum;
+            snapshot.pdfSourceId = page->pdfSourceId;
+            snapshot.pdfSourcePath = doc->pdfPathForSource(page->pdfSourceId);
+            snapshot.pdfDarkMode = pdfDarkMode;
+            qreal pdfDpi = (thumbnailWidth * dpr) / (pageSize.width() / 72.0);
+            snapshot.pdfDpi = qMin(pdfDpi, 96.0);
+        }
     }
     
     // Deep copy stroke data from all layers

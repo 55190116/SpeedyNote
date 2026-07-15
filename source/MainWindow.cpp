@@ -654,6 +654,13 @@ MainWindow::MainWindow(QWidget *parent)
                         return;
                     }
                 }
+
+                // Plan B2: on close (Save branch only), materialize imported PDF
+                // sources into bundled mini-PDFs so the .snb becomes self-contained.
+                // Never on the Discard branch (avoids persisting discarded imports).
+                if (doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                    doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
+                }
                 
                 tm->setTabTitle(index, doc->displayName());
                 tm->markTabModified(index, false);
@@ -661,6 +668,15 @@ MainWindow::MainWindow(QWidget *parent)
                 // setTabTitle/markTabModified signals above (when index is
                 // the current tab) and by activeViewportChanged after the
                 // closeTab() below switches to a sibling tab.
+            }
+        } else {
+            // Plan B2: no save prompt was shown because the document has no unsaved
+            // changes (e.g. the user pressed Ctrl+S then closed without editing). We
+            // still finalize imported PDF sources into bundled mini-PDFs here so a
+            // plain save-then-close leaves the .snb self-contained. Requires a real
+            // (non-temp) save location.
+            if (!isUsingTemp && doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
             }
         }
         
@@ -1295,6 +1311,11 @@ void MainWindow::setupUi() {
         options.destPath = outputPath;
         
         QApplication::setOverrideCursor(Qt::WaitCursor);
+        // Plan B2: materialize imported PDF sources into bundled mini-PDFs before the
+        // recursive zip so the .snbx is self-contained (updates document.json + pdfs/).
+        if (doc->needsMaterialization()) {
+            doc->saveBundle(bundlePath, /*finalize=*/true);
+        }
         auto result = NotebookExporter::exportPackage(doc, options);
         QApplication::restoreOverrideCursor();
         
@@ -9152,6 +9173,19 @@ void MainWindow::closeEvent(QCloseEvent *event) {
                                 return false;
                             }
                         }
+
+                        // Plan B2: materialize imported PDF sources into bundled
+                        // mini-PDFs on quit (Save branch only) so the .snb is portable.
+                        if (doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                            doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
+                        }
+                    }
+                } else {
+                    // Plan B2: no prompt because there are no unsaved changes (e.g.
+                    // Ctrl+S then quit without editing). Still finalize imported PDF
+                    // sources into bundled mini-PDFs, provided a real save location.
+                    if (!isUsingTemp && doc->needsMaterialization() && !doc->bundlePath().isEmpty()) {
+                        doc->saveBundle(doc->bundlePath(), /*finalize=*/true);
                     }
                 }
             }

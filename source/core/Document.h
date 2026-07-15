@@ -672,9 +672,13 @@ public:
     /**
      * @brief Save the entire document as a bundle.
      * @param path Path to the .snb directory.
+     * @param finalize When true, materialize non-primary imported PDF sources into
+     *        bundled mini-PDFs (Plan B2) before writing the manifest, so the bundle
+     *        becomes self-contained. Only used on document close and .snbx export;
+     *        ordinary saves/autosaves pass false to avoid grafting churn.
      * @return True if saved successfully.
      */
-    bool saveBundle(const QString& path);
+    bool saveBundle(const QString& path, bool finalize = false);
     
     /**
      * @brief Load a document from a bundle (tiles lazy-loaded).
@@ -1160,6 +1164,44 @@ public:
      * writes an empty path when no source remains). Called during saveBundle().
      */
     int pruneUnreferencedSources();
+
+    /**
+     * @brief Translate a page's ORIGINAL PDF page number to the index its provider
+     *        actually uses (Plan B2).
+     * @param sourceId Source id (empty = primary).
+     * @param originalPage 0-based page number in the ORIGINAL full PDF.
+     * @return For a bundled source, the mini-PDF page index from pageMap (or -1 if
+     *         the original page is not present in the mini-PDF). For a non-bundled
+     *         source (including the always-external primary), originalPage unchanged.
+     *
+     * Bundled mini-PDFs contain only the referenced pages, remapped to a compact
+     * index, while pages keep storing their original page number; every provider
+     * access must route the index through this helper.
+     */
+    int resolveSourcePageIndex(const QString& sourceId, int originalPage) const;
+
+    /**
+     * @brief Whether any non-primary source has referenced pages not yet bundled.
+     * @return True only when materialization is possible (MuPDF export available,
+     *         bundle path set) and there is un-bundled imported PDF content.
+     *
+     * Used to gate the finalize-on-close / finalize-on-export hooks so ordinary
+     * documents pay no cost.
+     */
+    bool needsMaterialization() const;
+
+    /**
+     * @brief Graft referenced pages of each non-primary source into a bundled
+     *        mini-PDF inside this bundle, marking those sources bundled (Plan B2).
+     * @param errorOut Optional: set to a message if a source failed to materialize.
+     * @return Number of sources materialized/updated.
+     *
+     * Incremental: only pages missing from a source's pageMap are appended, and a
+     * source with nothing new is skipped. The primary source is never materialized
+     * (it stays external/full, Q12.4). Requires a non-empty bundle path; callers
+     * invoke this from saveBundle(path, finalize=true).
+     */
+    int materializeSources(QString* errorOut = nullptr);
     
     /**
      * @brief Find the notebook page index for a given PDF page.
@@ -1193,7 +1235,29 @@ public:
      * - pdfPageIndexForNotebookPage(2) returns -1 (blank page, not PDF)
      */
     int pdfPageIndexForNotebookPage(int notebookPageIndex) const;
-    
+
+    /**
+     * @brief Resolve a notebook page to its PDF source id and PDF page number.
+     * @param notebookPageIndex 0-based notebook page index.
+     * @param outSourceId Set to the page's PDF source id (empty = primary source).
+     * @param outPdfPage Set to the 0-based PDF page number within that source.
+     * @return True if the page is PDF-backed, false otherwise.
+     *
+     * Unlike pdfPageIndexForNotebookPage(), this resolves against ANY source (not
+     * just primary), reading the live Page fields so it stays correct for pages
+     * imported at runtime. Used by multi-source export and search.
+     */
+    bool pdfBindingForNotebookPage(int notebookPageIndex, QString& outSourceId, int& outPdfPage) const;
+
+    /**
+     * @brief Eagerly open (and cache) providers for every registered PDF source.
+     *
+     * Call on the main thread before dispatching background search workers so that
+     * worker threads only ever read the provider cache (providerForSource() lazily
+     * mutates it, which is not safe to race from multiple threads).
+     */
+    void ensureAllPdfProvidersLoaded() const;
+
     /**
      * @brief Get the PDF title metadata.
      * @return Title string, or empty if not available.
