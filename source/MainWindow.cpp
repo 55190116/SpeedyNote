@@ -6023,6 +6023,11 @@ void MainWindow::updatePdfSearchBarPosition()
     
     // Ensure it's raised above viewport content
     m_pdfSearchBar->raise();
+
+    // SB4: keep a bottom-docked cross-axis scroll bar clear of the search bar.
+    if (m_splitViewManager && m_pdfSearchBar->isVisible()) {
+        m_splitViewManager->setViewportBottomInset(barHeight);
+    }
 }
 
 void MainWindow::showPdfSearchBar()
@@ -6045,6 +6050,11 @@ void MainWindow::showPdfSearchBar()
     
     // Sync dark mode
     m_pdfSearchBar->setDarkMode(isDarkMode());
+
+    // SB4: reserve bottom space so a bottom-docked cross-axis bar clears it.
+    if (m_splitViewManager) {
+        m_splitViewManager->setViewportBottomInset(m_pdfSearchBar->height());
+    }
 }
 
 void MainWindow::hidePdfSearchBar()
@@ -6061,6 +6071,12 @@ void MainWindow::hidePdfSearchBar()
     
     m_pdfSearchBar->hide();
     m_pdfSearchBar->clearStatus();
+
+    // SB4: release the reserved bottom space so a bottom-docked cross-axis bar
+    // drops back to the edge.
+    if (m_splitViewManager) {
+        m_splitViewManager->setViewportBottomInset(0);
+    }
     
     // Clear search highlights from viewport
     if (DocumentViewport *vp = currentViewport()) {
@@ -6076,6 +6092,47 @@ void MainWindow::hidePdfSearchBar()
     if (DocumentViewport *vp = currentViewport()) {
         vp->setFocus();
     }
+}
+
+// ============================================================================
+// Scroll-bar placement settings (Plan SB4) - delegate to SplitViewManager
+// ============================================================================
+
+bool MainWindow::scrollBarVerticalOnRight() const
+{
+    return m_splitViewManager &&
+           m_splitViewManager->scrollBarVerticalEdge() == ViewportScrollBar::DockEdge::Right;
+}
+
+void MainWindow::setScrollBarVerticalOnRight(bool onRight)
+{
+    if (!m_splitViewManager) return;
+    m_splitViewManager->setScrollBarVerticalEdge(onRight ? ViewportScrollBar::DockEdge::Right
+                                                         : ViewportScrollBar::DockEdge::Left);
+}
+
+bool MainWindow::scrollBarHorizontalOnBottom() const
+{
+    return m_splitViewManager &&
+           m_splitViewManager->scrollBarHorizontalEdge() == ViewportScrollBar::DockEdge::Bottom;
+}
+
+void MainWindow::setScrollBarHorizontalOnBottom(bool onBottom)
+{
+    if (!m_splitViewManager) return;
+    m_splitViewManager->setScrollBarHorizontalEdge(onBottom ? ViewportScrollBar::DockEdge::Bottom
+                                                            : ViewportScrollBar::DockEdge::Top);
+}
+
+bool MainWindow::scrollBarsPinned() const
+{
+    return m_splitViewManager && m_splitViewManager->scrollBarsPinned();
+}
+
+void MainWindow::setScrollBarsPinned(bool pinned)
+{
+    if (!m_splitViewManager) return;
+    m_splitViewManager->setScrollBarsPinned(pinned);
 }
 
 void MainWindow::onSearchNext(const QString& text, bool caseSensitive, bool wholeWord)

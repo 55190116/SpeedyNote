@@ -132,6 +132,17 @@ public:
     void setPalmRejectionDelay(int delayMs);
 #endif
 
+    // Scroll-bar placement settings (Plan SB4); delegate to SplitViewManager.
+    // Page-axis (vertical) bar: false = left edge, true = right edge.
+    bool scrollBarVerticalOnRight() const;
+    void setScrollBarVerticalOnRight(bool onRight);
+    // Cross-axis (horizontal) bar: false = top edge, true = bottom edge.
+    bool scrollBarHorizontalOnBottom() const;
+    void setScrollBarHorizontalOnBottom(bool onBottom);
+    // Keep bars pinned (visible; disables proximity auto-hide).
+    bool scrollBarsPinned() const;
+    void setScrollBarsPinned(bool pinned);
+
     // OCR language query (for ControlPanelDialog and per-document dialog)
     QStringList ocrAvailableLanguages() const { return m_ocrAvailableLanguages; }
     // Subset already present locally; the rest need an on-demand download.

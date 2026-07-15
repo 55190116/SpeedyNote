@@ -17,12 +17,13 @@
 #include <QVector>
 #include <QPointer>
 
+#include "widgets/ViewportScrollBar.h"  // ViewportScrollBar::DockEdge used in the API
+
 class TabBar;
 class TabManager;
 class Document;
 class DocumentViewport;
 class QStackedWidget;
-class ViewportScrollBar;
 class QTimer;
 
 class SplitViewManager : public QWidget {
@@ -132,6 +133,26 @@ public:
     bool scrollBarsPinned() const { return m_scrollBarsPinned; }
 
     /**
+     * @brief Choose which edge each overlay bar docks against (Plan SB4).
+     *
+     * The page-axis (vertical) bar accepts Left/Right; the cross-axis
+     * (horizontal) bar accepts Top/Bottom. Persisted to QSettings and applied
+     * live to both panes.
+     */
+    void setScrollBarVerticalEdge(ViewportScrollBar::DockEdge edge);
+    void setScrollBarHorizontalEdge(ViewportScrollBar::DockEdge edge);
+    ViewportScrollBar::DockEdge scrollBarVerticalEdge() const { return m_vEdge; }
+    ViewportScrollBar::DockEdge scrollBarHorizontalEdge() const { return m_hEdge; }
+
+    /**
+     * @brief Reserve @p px at the bottom of each pane so a bottom-docked
+     *        cross-axis bar clears the Ctrl+F search bar (Plan SB4).
+     *
+     * A no-op visually when the cross-axis bar is docked at the Top.
+     */
+    void setViewportBottomInset(int px);
+
+    /**
      * @brief Recompute the SB2 document map (per-source accents + link markers)
      *        for whichever pane is bound to @p vp and push it to that pane's
      *        vertical bar.
@@ -223,4 +244,10 @@ private:
     // Enhanced scroll bars (SB1), indexed by Pane (Left=0, Right=1)
     PaneBars m_paneBars[2];
     bool m_scrollBarsPinned = true;
+
+    // Docked edges (SB4): page-axis bar = Left/Right, cross-axis bar = Top/Bottom.
+    ViewportScrollBar::DockEdge m_vEdge = ViewportScrollBar::DockEdge::Left;
+    ViewportScrollBar::DockEdge m_hEdge = ViewportScrollBar::DockEdge::Top;
+    // Bottom space reserved for the search bar (SB4); shifts a bottom-docked hBar up.
+    int m_bottomInset = 0;
 };

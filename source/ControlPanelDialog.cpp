@@ -14,6 +14,7 @@
 #include <QGroupBox>
 #include <QLabel>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QSpacerItem>
 #include <QTableWidget>
 #include <QTreeWidget>
@@ -1540,6 +1541,62 @@ void ControlPanelDialog::createThemeTab() {
     };
     connect(pdfDarkModeCheckbox, &QCheckBox::toggled, this, updateSkipEnabled);
     updateSkipEnabled();
+
+    // --- Scroll bar placement (Plan SB4) -----------------------------------
+    layout->addSpacing(15);
+
+    QLabel *scrollBarSectionLabel = new QLabel(tr("Scroll Bar"), themeTab);
+    scrollBarSectionLabel->setStyleSheet("font-weight: bold; margin-top: 10px;");
+    layout->addWidget(scrollBarSectionLabel);
+
+    // Page-axis (vertical) bar edge: Left / Right.
+    QHBoxLayout *vEdgeLayout = new QHBoxLayout();
+    QLabel *vEdgeLabel = new QLabel(tr("Page scroll bar side:"), themeTab);
+    QComboBox *vEdgeCombo = new QComboBox(themeTab);
+    vEdgeCombo->addItem(tr("Left"));
+    vEdgeCombo->addItem(tr("Right"));
+    vEdgeLayout->addWidget(vEdgeLabel);
+    vEdgeLayout->addWidget(vEdgeCombo);
+    vEdgeLayout->addStretch();
+    layout->addLayout(vEdgeLayout);
+
+    // Cross-axis (horizontal) bar edge: Top / Bottom.
+    QHBoxLayout *hEdgeLayout = new QHBoxLayout();
+    QLabel *hEdgeLabel = new QLabel(tr("Horizontal scroll bar side:"), themeTab);
+    QComboBox *hEdgeCombo = new QComboBox(themeTab);
+    hEdgeCombo->addItem(tr("Top"));
+    hEdgeCombo->addItem(tr("Bottom"));
+    hEdgeLayout->addWidget(hEdgeLabel);
+    hEdgeLayout->addWidget(hEdgeCombo);
+    hEdgeLayout->addStretch();
+    layout->addLayout(hEdgeLayout);
+
+    QCheckBox *pinScrollBarsCheckbox = new QCheckBox(tr("Keep scroll bars always visible"), themeTab);
+    layout->addWidget(pinScrollBarsCheckbox);
+
+    QLabel *scrollBarNote = new QLabel(tr("Choose which edge each scroll bar docks against (right-side placement can "
+        "help avoid accidental palm input for pen users). When not pinned, bars float in on pen or cursor "
+        "proximity and fade out after a moment."), themeTab);
+    scrollBarNote->setWordWrap(true);
+    scrollBarNote->setStyleSheet("color: gray; font-size: 10px;");
+    layout->addWidget(scrollBarNote);
+
+    if (mainWindowRef) {
+        vEdgeCombo->setCurrentIndex(mainWindowRef->scrollBarVerticalOnRight() ? 1 : 0);
+        hEdgeCombo->setCurrentIndex(mainWindowRef->scrollBarHorizontalOnBottom() ? 1 : 0);
+        pinScrollBarsCheckbox->setChecked(mainWindowRef->scrollBarsPinned());
+    }
+
+    // Apply live as the user changes the controls.
+    connect(vEdgeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (mainWindowRef) mainWindowRef->setScrollBarVerticalOnRight(index == 1);
+    });
+    connect(hEdgeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (mainWindowRef) mainWindowRef->setScrollBarHorizontalOnBottom(index == 1);
+    });
+    connect(pinScrollBarsCheckbox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (mainWindowRef) mainWindowRef->setScrollBarsPinned(checked);
+    });
 
     layout->addStretch();
     

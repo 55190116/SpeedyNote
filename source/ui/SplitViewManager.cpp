@@ -93,6 +93,15 @@ SplitViewManager::SplitViewManager(QWidget* parent)
         QSettings settings;
         m_scrollBarsPinned = settings.value(QStringLiteral("scrollbar/pinned"),
                                              defaultScrollBarsPinned()).toBool();
+        // SB4: docked edges (page-axis Left/Right, cross-axis Top/Bottom).
+        m_vEdge = settings.value(QStringLiteral("scrollbar/verticalEdge"),
+                                 QStringLiteral("Left")).toString() == QLatin1String("Right")
+                      ? ViewportScrollBar::DockEdge::Right
+                      : ViewportScrollBar::DockEdge::Left;
+        m_hEdge = settings.value(QStringLiteral("scrollbar/horizontalEdge"),
+                                 QStringLiteral("Top")).toString() == QLatin1String("Bottom")
+                      ? ViewportScrollBar::DockEdge::Bottom
+                      : ViewportScrollBar::DockEdge::Top;
     }
     createScrollBars(Left);
 }
@@ -584,8 +593,8 @@ void SplitViewManager::createScrollBars(Pane pane)
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
     if (b.vBar) return;  // already created
 
-    b.vBar = new ViewportScrollBar(Qt::Vertical, ViewportScrollBar::DockEdge::Left, stack);
-    b.hBar = new ViewportScrollBar(Qt::Horizontal, ViewportScrollBar::DockEdge::Top, stack);
+    b.vBar = new ViewportScrollBar(Qt::Vertical, m_vEdge, stack);
+    b.hBar = new ViewportScrollBar(Qt::Horizontal, m_hEdge, stack);
     b.vBar->setDarkMode(m_darkMode);
     b.hBar->setDarkMode(m_darkMode);
 
@@ -630,13 +639,26 @@ void SplitViewManager::repositionScrollBars(Pane pane)
     const int w = stack->width();
     const int h = stack->height();
 
-    // Vertical (page-axis) bar on the LEFT edge; horizontal (cross-axis) on TOP.
-    b.vBar->setGeometry(margin,
-                        corner + margin,
+    const bool vRight  = (m_vEdge == ViewportScrollBar::DockEdge::Right);
+    const bool hBottom = (m_hEdge == ViewportScrollBar::DockEdge::Bottom);
+
+    // Vertical (page-axis) bar: docked left or right, spanning the height with
+    // the corner reserved at the end the horizontal bar occupies.
+    const int vX = vRight ? (w - thickness - margin) : margin;
+    const int vY = hBottom ? margin : (corner + margin);
+    const int vBottomReserve = hBottom ? m_bottomInset : 0;
+    b.vBar->setGeometry(vX,
+                        vY,
                         thickness,
-                        qMax(0, h - corner - margin * 2));
-    b.hBar->setGeometry(corner + margin,
-                        margin,
+                        qMax(0, h - corner - margin * 2 - vBottomReserve));
+
+    // Horizontal (cross-axis) bar: docked top or bottom, spanning the width with
+    // the corner reserved at the end the vertical bar occupies. When docked at
+    // the bottom it is lifted by m_bottomInset to clear the search bar (SB4).
+    const int hX = vRight ? margin : (corner + margin);
+    const int hY = hBottom ? (h - thickness - margin - m_bottomInset) : margin;
+    b.hBar->setGeometry(hX,
+                        hY,
                         qMax(0, w - corner - margin * 2),
                         thickness);
     b.vBar->raise();
@@ -876,6 +898,49 @@ void SplitViewManager::setScrollBarsPinned(bool pinned)
     }
 }
 
+void SplitViewManager::setScrollBarVerticalEdge(ViewportScrollBar::DockEdge edge)
+{
+    if (edge != ViewportScrollBar::DockEdge::Left &&
+        edge != ViewportScrollBar::DockEdge::Right) {
+        return;  // page-axis bar only lives on the left/right edges
+    }
+    if (m_vEdge == edge) return;
+    m_vEdge = edge;
+    QSettings().setValue(QStringLiteral("scrollbar/verticalEdge"),
+                         edge == ViewportScrollBar::DockEdge::Right
+                             ? QStringLiteral("Right") : QStringLiteral("Left"));
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].vBar) m_paneBars[i].vBar->setDockEdge(edge);
+        repositionScrollBars(static_cast<Pane>(i));
+    }
+}
+
+void SplitViewManager::setScrollBarHorizontalEdge(ViewportScrollBar::DockEdge edge)
+{
+    if (edge != ViewportScrollBar::DockEdge::Top &&
+        edge != ViewportScrollBar::DockEdge::Bottom) {
+        return;  // cross-axis bar only lives on the top/bottom edges
+    }
+    if (m_hEdge == edge) return;
+    m_hEdge = edge;
+    QSettings().setValue(QStringLiteral("scrollbar/horizontalEdge"),
+                         edge == ViewportScrollBar::DockEdge::Bottom
+                             ? QStringLiteral("Bottom") : QStringLiteral("Top"));
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].hBar) m_paneBars[i].hBar->setDockEdge(edge);
+        repositionScrollBars(static_cast<Pane>(i));
+    }
+}
+
+void SplitViewManager::setViewportBottomInset(int px)
+{
+    px = qMax(0, px);
+    if (m_bottomInset == px) return;
+    m_bottomInset = px;
+    repositionScrollBars(Left);
+    if (isSplit()) repositionScrollBars(Right);
+}
+
 void SplitViewManager::proximityFloatCheck(QEvent* event)
 {
     // Palm rejection: only a real pen (tablet) or a non-finger mouse may arm
@@ -906,13 +971,19 @@ void SplitViewManager::checkPaneProximity(Pane pane, const QPointF& globalPos)
     const QPoint local = stack->mapFromGlobal(globalPos.toPoint());
     if (!stack->rect().contains(local)) return;
 
-    // Arm when the pointer is near the docked edges the bars live on
-    // (left edge for the vertical bar, top edge for the horizontal bar),
+    // Arm when the pointer is near the docked edges the bars actually live on
+    // (SB4: left/right for the vertical bar, top/bottom for the horizontal bar),
     // including the region the bars themselves occupy.
     const int threshold = 24;
-    const bool nearLeft = local.x() <= threshold;
-    const bool nearTop = local.y() <= threshold;
-    if (nearLeft || nearTop) {
+    const int w = stack->width();
+    const int h = stack->height();
+    const bool nearVEdge = (m_vEdge == ViewportScrollBar::DockEdge::Right)
+                               ? (local.x() >= w - threshold)
+                               : (local.x() <= threshold);
+    const bool nearHEdge = (m_hEdge == ViewportScrollBar::DockEdge::Bottom)
+                               ? (local.y() >= h - threshold)
+                               : (local.y() <= threshold);
+    if (nearVEdge || nearHEdge) {
         showScrollBars(pane);
     }
 }
