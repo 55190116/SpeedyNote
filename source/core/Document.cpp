@@ -1295,6 +1295,70 @@ void Document::copyImageAssets(Document* srcDoc, const QJsonObject& pageJson) co
     }
 }
 
+QString Document::ensureImportedPdfSourceId(Document* srcDoc, const QString& originSourceId)
+{
+    if (!srcDoc) {
+        return QString();
+    }
+
+    const PdfSource* os = srcDoc->pdfSourceById(originSourceId);
+    if (!os) {
+        return QString();  // Origin source unresolved; page stays blank.
+    }
+
+    const QString path = srcDoc->pdfPathForSource(originSourceId);
+    const QString hash = os->hash;
+    const qint64 size = os->size;
+
+    QString destId;
+    if (!hash.isEmpty()) {
+        // registerSource dedups by hash+size, returning an existing id on match.
+        destId = registerSource(path, hash, size, /*bundled*/ false);
+    } else {
+        // Hashless origin (e.g. legacy doc): dedup on absolute path so repeated
+        // imports of the same file don't proliferate sources.
+        for (const PdfSource& s : m_pdfSources) {
+            if (!s.path.isEmpty() && s.path == path) {
+                destId = s.id;
+                break;
+            }
+        }
+        if (destId.isEmpty()) {
+            destId = registerSource(path, hash, size, /*bundled*/ false);
+        }
+    }
+
+    // A page mapped onto the primary (index 0) must carry an empty source id:
+    // unreferencedSourceIds() only counts empty-id pages as referencing the
+    // primary, so an explicit primary id would cause it to be pruned on save.
+    if (!m_pdfSources.empty() && m_pdfSources.front().id == destId) {
+        return QString();
+    }
+    return destId;
+}
+
+void Document::remapImportedPdfSource(QJsonObject& pageJson, Document* srcDoc)
+{
+    if (pageJson.value("backgroundType").toInt(0) !=
+        static_cast<int>(Page::BackgroundType::PDF)) {
+        return;
+    }
+    if (pageJson.value("pdfPageNumber").toInt(-1) < 0) {
+        return;
+    }
+
+    const QString originId = pageJson.value("pdfSourceId").toString();
+    const QString destId = ensureImportedPdfSourceId(srcDoc, originId);
+
+    if (destId.isEmpty()) {
+        // Primary or unresolved: match how Page::toJson omits the key for primary
+        // pages, and clear any stale origin id.
+        pageJson.remove("pdfSourceId");
+    } else {
+        pageJson["pdfSourceId"] = destId;
+    }
+}
+
 PageImportResult Document::importPagesFrom(Document* srcDoc, const QStringList& srcPageUuids, int destIndex)
 {
     PageImportResult result;
@@ -1325,6 +1389,11 @@ PageImportResult Document::importPagesFrom(Document* srcDoc, const QStringList& 
         // Copy referenced on-disk image assets into this document's store BEFORE
         // insertion, so restorePageFromSnapshot's loadImages() can resolve them.
         copyImageAssets(srcDoc, json);
+
+        // Plan B-pdf: resolve the page's PDF source into THIS document's registry
+        // (dedup by identity, else register an external reference) and rewrite
+        // its pdfSourceId so the copied page renders in the destination.
+        remapImportedPdfSource(json, srcDoc);
 
         // Regenerate ids so the copy is fully independent of the source.
         QJsonObject finalJson = regeneratePageIds(json, result.pageUuidMap, result.objectIdMap);

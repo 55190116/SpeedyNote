@@ -1672,6 +1672,17 @@ private:
     /// store into this document's assets store (skips assets already present;
     /// content-hash filenames make this inherently deduped).
     void copyImageAssets(Document* srcDoc, const QJsonObject& pageJson) const;
+    /// Resolve @p srcDoc's source (@p originSourceId, empty = origin primary) into
+    /// a source id in THIS document's registry: dedup by identity hash+size (path
+    /// fallback when hash is empty), else register a new external source pointing
+    /// at the origin PDF's absolute path. Returns the destination source id, or an
+    /// empty string when the match is this document's primary (index 0) or the
+    /// origin source cannot be resolved (Plan B-pdf).
+    QString ensureImportedPdfSourceId(Document* srcDoc, const QString& originSourceId);
+    /// For a PDF-backed @p pageJson, rewrite its pdfSourceId to reference a source
+    /// in this document (via ensureImportedPdfSourceId) so the copied page renders
+    /// in the destination. pdfPageNumber is left unchanged (Plan B-pdf).
+    void remapImportedPdfSource(QJsonObject& pageJson, Document* srcDoc);
     
     // ===== Paged Mode Lazy Loading (Phase O1.7) =====
     /// Ordered list of page UUIDs. Defines page order in the document.
