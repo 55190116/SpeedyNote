@@ -54,6 +54,8 @@ struct PdfSearchMatch {
     bool isValid() const { return pageIndex >= 0 && matchIndex >= 0; }
 };
 
+Q_DECLARE_METATYPE(PdfSearchMatch)
+
 /**
  * @brief Current state of a search session.
  * 
@@ -178,6 +180,25 @@ public:
      */
     void findPrev(const QString& text, bool caseSensitive, bool wholeWord,
                   int startPage, int startMatchIndex = -1);
+
+    /**
+     * @brief Scan the entire document for matches, streaming results (SBS2).
+     * @param text Text to search for.
+     * @param caseSensitive Case-sensitive matching.
+     * @param wholeWord Whole word matching only.
+     *
+     * Walks every page on a background thread (reusing the per-page cache),
+     * emitting pageScanned() for each page with >=1 match and scanComplete()
+     * at the end. Independent of findNext/findPrev navigation. No-op for
+     * edgeless documents (page-axis markers are paged-only). Restarting cancels
+     * any in-flight scan.
+     */
+    void scanAllPages(const QString& text, bool caseSensitive, bool wholeWord);
+
+    /**
+     * @brief Cancel any ongoing whole-document scan (SBS2).
+     */
+    void cancelScan();
     
     /**
      * @brief Cancel any ongoing search.
@@ -216,6 +237,19 @@ signals:
      * @param totalPages Total pages in document.
      */
     void progressUpdated(int currentPage, int totalPages);
+
+    /**
+     * @brief SBS2: emitted (queued) as each page with matches is scanned.
+     * @param pageIndex Notebook page index.
+     * @param matches All matches found on that page.
+     */
+    void pageScanned(int pageIndex, const QVector<PdfSearchMatch>& matches);
+
+    /**
+     * @brief SBS2: emitted when a whole-document scan finishes.
+     * @param totalMatches Total match count across the document.
+     */
+    void scanComplete(int totalMatches);
     
 private slots:
     void onSearchFinished();
@@ -266,6 +300,11 @@ private:
     void doPrecache(int centerPage, int direction);
 
     /**
+     * @brief SBS2: background thread function for the whole-document scan.
+     */
+    void doScanAll();
+
+    /**
      * @brief Search OCR text blocks for matches.
      */
     QVector<PdfSearchMatch> searchOcrBlocks(
@@ -304,6 +343,7 @@ private:
     Document *m_document = nullptr;
     std::atomic<bool> m_searchCancelled{false};   ///< Cancellation for main search only
     std::atomic<bool> m_precacheCancelled{false}; ///< Cancellation for pre-cache only
+    std::atomic<bool> m_scanCancelled{false};     ///< SBS2: cancellation for whole-document scan
     
     // Current search parameters
     QString m_searchText;
@@ -318,6 +358,7 @@ private:
     // Background search
     QFutureWatcher<void> m_searchWatcher;
     QFutureWatcher<void> m_precacheWatcher;
+    QFutureWatcher<void> m_scanWatcher;              ///< SBS2: whole-document scan
     
     // Result from background search (protected by mutex)
     mutable QMutex m_resultMutex;

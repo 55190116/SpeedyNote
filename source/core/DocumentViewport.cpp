@@ -1125,6 +1125,52 @@ void DocumentViewport::scrollToPositionOnPage(int pageIndex, QPointF normalizedP
                  */
 }
 
+qreal DocumentViewport::searchMatchPageYFraction(const PdfSearchMatch& match) const
+{
+    // SBS1: page-local Y fraction of a match center, for reveal + scroll-bar ticks.
+    if (!m_document || match.pageIndex < 0) {
+        return -1.0;
+    }
+    // Tile/edgeless sources have no page-axis position.
+    if (match.source == PdfSearchMatch::OcrTextTile ||
+        match.source == PdfSearchMatch::TextBoxObjTile) {
+        return -1.0;
+    }
+
+    const qreal pageHeight = m_document->pageSizeAt(match.pageIndex).height();
+    if (pageHeight <= 0.0) {
+        return -1.0;
+    }
+
+    // Convert the match rect to page coords exactly as renderSearchMatchesOverlay.
+    QRectF pageRect = match.boundingRect;
+    if (match.source == PdfSearchMatch::PdfText) {
+        pageRect = QRectF(pageRect.x() * PDF_TO_PAGE_SCALE,
+                          pageRect.y() * PDF_TO_PAGE_SCALE,
+                          pageRect.width() * PDF_TO_PAGE_SCALE,
+                          pageRect.height() * PDF_TO_PAGE_SCALE);
+    }
+
+    const qreal centerY = pageRect.y() + pageRect.height() / 2.0;
+    return qBound(0.0, centerY / pageHeight, 1.0);
+}
+
+bool DocumentViewport::isPagePositionVisible(int pageIndex, qreal normY) const
+{
+    // SBS1: is the given page-local Y currently within the viewport (vertical)?
+    if (!m_document || m_zoomLevel <= 0.0) {
+        return false;
+    }
+    pageIndex = qBound(0, pageIndex, m_document->pageCount() - 1);
+
+    const qreal docY = pagePosition(pageIndex).y()
+                     + qBound(0.0, normY, 1.0) * m_document->pageSizeAt(pageIndex).height();
+    const qreal viewTop = m_panOffset.y();
+    const qreal viewBottom = viewTop + height() / m_zoomLevel;
+    const qreal margin = 20.0 / m_zoomLevel;  // treat matches hugging an edge as off-screen
+    return docY >= viewTop + margin && docY <= viewBottom - margin;
+}
+
 void DocumentViewport::navigateToPosition(QString pageUuid, QPointF position)
 {
     // Phase C.5.1: Navigate to a specific page position (for LinkObject Position slots)
@@ -1657,6 +1703,35 @@ QSizeF DocumentViewport::totalContentSize() const
     // in a single O(n) pass, avoiding repeated O(n) iterations on every scroll.
     ensurePageLayoutCache();
     return m_cachedContentSize;
+}
+
+qreal DocumentViewport::pageTrackFraction(int pageIndex) const
+{
+    // SB2: normalized top-of-page position in the scroll bar's track space.
+    if (!m_document || m_document->isEdgeless()) {
+        return -1.0;
+    }
+    const int count = m_document->pageCount();
+    if (count <= 0) {
+        return -1.0;
+    }
+
+    ensurePageLayoutCache();
+    const qreal contentHeight = m_cachedContentSize.height();
+    if (contentHeight <= 0.0) {
+        return -1.0;
+    }
+
+    if (pageIndex <= 0) {
+        return 0.0;
+    }
+    if (pageIndex >= count) {
+        return 1.0;  // bottom of the last page
+    }
+    if (pageIndex >= m_pageYCache.size()) {
+        return 1.0;  // defensive: cache smaller than expected
+    }
+    return qBound(0.0, m_pageYCache[pageIndex] / contentHeight, 1.0);
 }
 
 int DocumentViewport::pageAtPoint(QPointF documentPt) const
@@ -7675,6 +7750,11 @@ void DocumentViewport::createLinkObjectForHighlight(int pageIndex)
 
     pushObjectInsertUndo(rawPtr, pageIndex, {});
 
+    // SB2: a highlight-created LinkObject adds a scroll-bar marker; keep the
+    // outline cache current and notify listeners (scroll bar + notes sidebar).
+    m_document->refreshLinkOutlineFor(pageIndex);
+    emit linkObjectListMayHaveChanged();
+
 #ifdef QT_DEBUG
     qDebug() << "Created LinkObject for highlight on page" << pageIndex
              << "description:" << rawPtr->description.left(30);
@@ -7756,6 +7836,10 @@ void DocumentViewport::createLinkObjectAtPosition(int pageIndex, const QPointF& 
     }
     
     emit documentModified();
+    // SB2: a brand-new LinkObject adds a scroll-bar marker. Refresh the outline
+    // cache for the owning container and notify listeners (scroll bar + notes).
+    markLinkContainerDirtyAndRefreshOutline(rawPtr);
+    emit linkObjectListMayHaveChanged();
     update();
     
 #ifdef SPEEDYNOTE_DEBUG

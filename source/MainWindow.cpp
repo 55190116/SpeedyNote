@@ -767,96 +767,10 @@ void MainWindow::setupUi() {
 
     // REMOVED MW5.2+: Zoom buttons moved to NavigationBar/Toolbar
 
-    panXSlider = new QScrollBar(Qt::Horizontal, this);
-    panYSlider = new QScrollBar(Qt::Vertical, this);
-    panYSlider->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
-    
-    // Phase 3.3: Set fixed high-resolution range for scroll fraction (0.0-1.0 mapped to 0-10000)
-    panXSlider->setRange(0, 10000);
-    panYSlider->setRange(0, 10000);
-    // Set page step to control handle size (10% of range = reasonable handle size)
-    panXSlider->setPageStep(1000);
-    panYSlider->setPageStep(1000);
-    
-    // Set scrollbar styling - semi-transparent overlay style
-    QString scrollBarStyle = R"(
-        QScrollBar {
-            background: rgba(180, 180, 180, 120);
-            border: none;
-            margin: 0px;
-        }
-        QScrollBar:hover {
-            background: rgba(180, 180, 180, 180);
-        }
-        QScrollBar:horizontal {
-            height: 16px !important;
-            max-height: 16px !important;
-        }
-        QScrollBar:vertical {
-            width: 16px !important;
-            max-width: 16px !important;
-        }
-        QScrollBar::handle {
-            background: rgba(100, 100, 100, 180);
-            border-radius: 3px;
-            min-height: 40px;
-            min-width: 40px;
-        }
-        QScrollBar::handle:hover {
-            background: rgba(80, 80, 80, 220);
-        }
-        /* Hide scroll buttons */
-        QScrollBar::add-line, 
-        QScrollBar::sub-line {
-            width: 0px;
-            height: 0px;
-            background: none;
-            border: none;
-        }
-        /* Disable scroll page buttons */
-        QScrollBar::add-page, 
-        QScrollBar::sub-page {
-            background: transparent;
-        }
-    )";
-    
-    panXSlider->setStyleSheet(scrollBarStyle);
-    panYSlider->setStyleSheet(scrollBarStyle);
-    
-    // Force fixed dimensions programmatically
-    panXSlider->setFixedHeight(16);
-    panYSlider->setFixedWidth(16);
-    
-    // MW5.8: Keyboard detection and auto-hide scrollbars
-    panXSlider->setMouseTracking(true);
-    panYSlider->setMouseTracking(true);
-    
-    // Detect keyboard and set initial visibility
-    m_hasKeyboard = hasPhysicalKeyboard();
-    scrollbarsVisible = m_hasKeyboard;
-    panXSlider->setVisible(scrollbarsVisible);
-    panYSlider->setVisible(scrollbarsVisible);
-    
-    // Create timer for auto-hiding (3 seconds of inactivity)
-    scrollbarHideTimer = new QTimer(this);
-    scrollbarHideTimer->setSingleShot(true);
-    scrollbarHideTimer->setInterval(3000);  // 3 seconds
-    connect(scrollbarHideTimer, &QTimer::timeout, this, &MainWindow::hideScrollbars);
-    
-    // FIX: Start autohide timer if scrollbars are initially visible
-    // Without this, scrollbars stay visible forever until user interacts with them
-    if (scrollbarsVisible) {
-        scrollbarHideTimer->start();
-    }
-    
-    
-
-    // panXSlider->setFixedHeight(30);
-    // panYSlider->setFixedWidth(30);
-
-    connect(panXSlider, &QScrollBar::valueChanged, this, &MainWindow::updatePanX);
-    
-    connect(panYSlider, &QScrollBar::valueChanged, this, &MainWindow::updatePanY);
+    // SB1: The overlay pan sliders were retired in favor of per-pane
+    // ViewportScrollBar widgets owned by SplitViewManager. See
+    // source/ui/widgets/ViewportScrollBar.* and SplitViewManager's scroll-bar
+    // helpers. MainWindow no longer creates or drives scroll bars.
 
     // REMOVED MW7.5: PDF Outline Sidebar creation removed - outline sidebar deleted
     
@@ -1185,25 +1099,19 @@ void MainWindow::setupUi() {
     // Enable context menu for the workaround
     canvasContainer->setContextMenuPolicy(Qt::CustomContextMenu);
     
-    // Set up the scrollbars to overlay the canvas
-    panXSlider->setParent(canvasContainer);
-    panYSlider->setParent(canvasContainer);
-    
-    // Raise scrollbars to ensure they're visible above the canvas
-    panXSlider->raise();
-    panYSlider->raise();
-    
     // Handle scrollbar intersection
     connect(canvasContainer, &QWidget::customContextMenuRequested, this, [this]() {
         // This connection is just to make sure the container exists
         // and can receive signals - a workaround for some Qt versions
     });
     
-    // Position the scrollbars at the bottom and right edges
+    // SB1: canvasContainer resize repositions the floating action bar and
+    // PDF search bar (see updateScrollbarPositions). The scroll bars
+    // themselves are now per-pane children of the viewport stacks.
     canvasContainer->installEventFilter(this);
     
-    // Update scrollbar positions initially
-    QTimer::singleShot(0, this, [this, canvasContainer]() {
+    // Position the floating overlays (action bar, PDF search bar) initially.
+    QTimer::singleShot(0, this, [this]() {
         updateScrollbarPositions();
     });
 
@@ -2379,9 +2287,6 @@ MainWindow::~MainWindow() {
         disconnect(m_splitViewManager, nullptr, this, nullptr);
     }
     
-    // Phase 3.3: Clean up viewport scroll connections
-    if (m_hScrollConn) disconnect(m_hScrollConn);
-    if (m_vScrollConn) disconnect(m_vScrollConn);
     // CR-2B: Cleanup tool/mode signal connections
     if (m_toolChangedConn) disconnect(m_toolChangedConn);
     if (m_straightLineModeConn) disconnect(m_straightLineModeConn);
@@ -2436,35 +2341,11 @@ void MainWindow::switchPage(int pageIndex) {
     vp->scrollToPage(pageIndex);
 }
 
-void MainWindow::updatePanX(int value) {
-    // Phase 3.3: Convert slider value to fraction and apply to viewport
-    if (DocumentViewport* vp = currentViewport()) {
-        qreal fraction = value / 10000.0;
-        vp->setHorizontalScrollFraction(fraction);
-    }
-}
-
-void MainWindow::updatePanY(int value) {
-    // Phase 3.3: Convert slider value to fraction and apply to viewport
-    if (DocumentViewport* vp = currentViewport()) {
-        qreal fraction = value / 10000.0;
-        vp->setVerticalScrollFraction(fraction);
-    }
-}
-
 void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
-    // Phase 3.3: Connect viewport scroll signals to update pan sliders
-    // This is called when the current viewport changes (tab switch)
+    // Connects the current viewport's tool/mode/event signals. Scroll-fraction
+    // <-> scroll-bar plumbing now lives per-pane in SplitViewManager (SB1);
+    // this method keeps the viewport event filter and tool/mode connections.
     
-    // Disconnect any previous viewport connections
-    if (m_hScrollConn) {
-        disconnect(m_hScrollConn);
-        m_hScrollConn = {};
-    }
-    if (m_vScrollConn) {
-        disconnect(m_vScrollConn);
-        m_vScrollConn = {};
-    }
     // CR-2B: Disconnect tool/mode signal connections
     if (m_toolChangedConn) {
         disconnect(m_toolChangedConn);
@@ -2609,55 +2490,11 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
     // Install event filter on the new viewport for wheel/tablet event handling
     viewport->installEventFilter(this);
     m_connectedViewport = viewport;  // QPointer tracks lifetime
-    
-    // Initialize slider values from current viewport state
-    // Guard against division by zero (zoomLevel should never be 0, but be safe)
-    qreal zoomLevel = viewport->zoomLevel();
-    if (zoomLevel <= 0) {
-        zoomLevel = 1.0;
-    }
-    
-    QPointF panOffset = viewport->panOffset();
-    QSizeF contentSize = viewport->totalContentSize();
-    
-    qreal viewWidth = viewport->width() / zoomLevel;
-    qreal viewHeight = viewport->height() / zoomLevel;
-    qreal scrollableWidth = contentSize.width() - viewWidth;
-    qreal scrollableHeight = contentSize.height() - viewHeight;
-    
-    qreal hFraction = (scrollableWidth > 0) ? qBound(0.0, panOffset.x() / scrollableWidth, 1.0) : 0.0;
-    qreal vFraction = (scrollableHeight > 0) ? qBound(0.0, panOffset.y() / scrollableHeight, 1.0) : 0.0;
-    
-    if (panXSlider) {
-                panXSlider->blockSignals(true);
-        panXSlider->setValue(qRound(hFraction * 10000));
-                panXSlider->blockSignals(false);
-            }
-    if (panYSlider) {
-        panYSlider->blockSignals(true);
-        panYSlider->setValue(qRound(vFraction * 10000));
-        panYSlider->blockSignals(false);
-        }
-    
-    // MW5.8: Connect scroll signals - show scrollbars on scroll, with auto-hide
-    m_hScrollConn = connect(viewport, &DocumentViewport::horizontalScrollChanged, this, [this](qreal fraction) {
-        showScrollbars();  // MW5.8: Show on scroll activity
-        if (panXSlider) {
-            panXSlider->blockSignals(true);
-            panXSlider->setValue(qRound(fraction * 10000));
-            panXSlider->blockSignals(false);
-        }
-    });
-    
-    m_vScrollConn = connect(viewport, &DocumentViewport::verticalScrollChanged, this, [this](qreal fraction) {
-        showScrollbars();  // MW5.8: Show on scroll activity
-        if (panYSlider) {
-            panYSlider->blockSignals(true);
-            panYSlider->setValue(qRound(fraction * 10000));
-            panYSlider->blockSignals(false);
-        }
-    });
-    
+
+    // SB1: scroll-fraction <-> scroll-bar plumbing is handled per-pane by
+    // SplitViewManager (bound to each pane's own viewport), so MainWindow no
+    // longer initializes or connects the old overlay sliders here.
+
     // CR-2B: Connect tool/mode signals for keyboard shortcut sync
     // When tool is changed via keyboard shortcuts or programmatically,
     // update the toolbar button and subtoolbar to match
@@ -3081,6 +2918,10 @@ void MainWindow::connectViewportScrollSignals(DocumentViewport* viewport) {
                 this, [this]() {
             if (markdownNotesSidebar && markdownNotesSidebar->isVisible()) {
                 refreshNotesOutline();
+            }
+            // SB2: link add/remove/move/undo/redo changes the scroll-bar markers.
+            if (m_splitViewManager) {
+                m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
             }
         });
 
@@ -3617,6 +3458,12 @@ void MainWindow::showPdfExportDialog()
 
 void MainWindow::updateOutlinePanelForDocument(Document* doc)
 {
+    // SB2: the scroll-bar document map (per-source accents + link markers)
+    // depends on the same source registry / structure this refresh reflects.
+    if (m_splitViewManager) {
+        m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
+    }
+
     if (!m_leftSidebar) {
         return;
     }
@@ -3784,6 +3631,11 @@ void MainWindow::notifyPageStructureChanged(Document* doc, int currentPage)
         if (currentPage >= 0) {
             m_pagePanelActionBar->setCurrentPage(currentPage);
         }
+    }
+
+    // SB2: page add/remove/reorder shifts accent runs and marker positions.
+    if (m_splitViewManager) {
+        m_splitViewManager->updateScrollBarDocumentMap(currentViewport());
     }
 }
 
@@ -4552,6 +4404,13 @@ void MainWindow::refreshDestinationAfterImport(DocumentViewport* destVp, int des
     if (destVp == currentViewport()) {
         notifyPageStructureChanged(destDoc, destVp->currentPageIndex());
     }
+
+    // SB2: an import can add a PDF source and pages, changing accents/markers.
+    // Target destVp explicitly so the map refreshes even when the destination
+    // lives in the inactive pane.
+    if (m_splitViewManager) {
+        m_splitViewManager->updateScrollBarDocumentMap(destVp);
+    }
 }
 
 void MainWindow::handlePageTransferDrop(const QString& srcToken,
@@ -5075,44 +4934,8 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event) {
     // BUG-AB-001/UI-001 FIX: Use m_canvasContainer directly instead of m_viewportStack->parentWidget()
     // The event filter was installed on m_canvasContainer, so compare with that directly
     if (obj == m_canvasContainer && event->type() == QEvent::Resize) {
-        updateScrollbarPositions();
+        updateScrollbarPositions();  // SB1: repositions the action bar + PDF search bar
         return false; // Let the event propagate
-    }
-
-    // MW5.8: Handle scrollbar visibility with auto-hide
-    if (obj == panXSlider || obj == panYSlider) {
-        if (event->type() == QEvent::Enter) {
-            // Mouse entered scrollbar area - keep visible
-            showScrollbars();
-            if (scrollbarHideTimer && scrollbarHideTimer->isActive()) {
-                scrollbarHideTimer->stop();  // Don't hide while hovering
-            }
-            return false;
-        } 
-        else if (event->type() == QEvent::Leave) {
-            // Mouse left scrollbar area - start hide timer
-            if (scrollbarHideTimer && scrollbarsVisible) {
-                scrollbarHideTimer->start();
-            }
-            return false;
-        }
-    }
-
-    // Phase 3.1.8: InkCanvas event filtering disabled - DocumentViewport handles its own events
-    // Check if this is a viewport event for scrollbar handling
-    DocumentViewport* viewport = qobject_cast<DocumentViewport*>(obj);
-    if (viewport) {
-        // Handle mouse movement for scrollbar visibility
-        if (event->type() == QEvent::MouseMove) {
-            // QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
-            // TODO Phase 3.3: Implement edge proximity for scrollbar visibility
-        }
-        // Handle tablet events for stylus hover (safely)
-        else if (event->type() == QEvent::TabletMove) {
-            // TODO Phase 3.3: Implement tablet hover handling
-        }
-        // Wheel events are now handled entirely by DocumentViewport::wheelEvent()
-        // including trackpad blocking when TouchGestureMode::Disabled
     }
 
     return QObject::eventFilter(obj, event);
@@ -5667,105 +5490,15 @@ void MainWindow::wheelEvent(QWheelEvent *event) {
     QMainWindow::wheelEvent(event);
 }
 
-// ==================== MW5.8: Pan Slider Management ====================
-
-bool MainWindow::hasPhysicalKeyboard() {
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    // Qt6: enumerate input devices and look for a keyboard
-    const auto devices = QInputDevice::devices();
-    for (const QInputDevice *device : devices) {
-        if (device->type() == QInputDevice::DeviceType::Keyboard) {
-            return true;
-        }
-    }
-    return false;
-#else
-    // Qt5: QInputDevice does not exist; assume a physical keyboard is present
-    // (desktop / Win32 target always has a keyboard)
-    return true;
-#endif
-}
-
-void MainWindow::showScrollbars() {
-    // Only show if keyboard is connected
-    if (!m_hasKeyboard) {
-        m_hasKeyboard = hasPhysicalKeyboard();  // Re-check in case keyboard was plugged in
-        if (!m_hasKeyboard) return;
-    }
-    
-    if (!scrollbarsVisible) {
-        scrollbarsVisible = true;
-        if (panXSlider) panXSlider->setVisible(true);
-        if (panYSlider) panYSlider->setVisible(true);
-        updateScrollbarPositions();
-    }
-    
-    // Reset the hide timer
-    if (scrollbarHideTimer) {
-        scrollbarHideTimer->stop();
-        scrollbarHideTimer->start();
-    }
-}
-
-void MainWindow::hideScrollbars() {
-    if (scrollbarsVisible) {
-        scrollbarsVisible = false;
-        if (panXSlider) panXSlider->setVisible(false);
-        if (panYSlider) panYSlider->setVisible(false);
-    }
-}
+// ==================== Floating overlay positioning ====================
 
 void MainWindow::updateScrollbarPositions() {
-    // MW5.8: Position sliders relative to their parent container (canvasContainer)
-    // Note: Sliders are children of canvasContainer, NOT the main window, so their
-    // coordinates are relative to canvasContainer. The left sidebar is a sibling of
-    // canvasContainer in the layout, so we should NOT add sidebar offset here.
-    QWidget *container = m_splitViewManager ? m_splitViewManager->viewportSplitter() : nullptr;
-    if (!container || !panXSlider || !panYSlider || !m_splitViewManager) return;
-    
-    // Don't position if not visible
-    if (!scrollbarsVisible) return;
-    
-    // Add small margins for better visibility
-    const int margin = 3;
-    
-    // Get scrollbar dimensions - use fixed values since setFixedHeight/Width was called
-    const int scrollbarWidth = 16;  // panYSlider fixed width
-    const int scrollbarHeight = 16; // panXSlider fixed height
-    
-    // Calculate container dimensions
-    int containerWidth = container->width();
-    int containerHeight = container->height();
-    
-    // Leave a bit of space for the corner where panX and panY would intersect
-    int cornerOffset = 15;
-    
-    // Position horizontal scrollbar at top
-    // Pan X: Full width of container minus corner space for panY slider
-    panXSlider->setGeometry(
-        cornerOffset + margin,  // After corner space for panY
-        margin,  // At top of container
-        containerWidth - cornerOffset - margin * 2,  // Width minus corner and margins
-        scrollbarHeight
-    );
-    
-    // Position vertical scrollbar at left
-    // Pan Y: On the LEFT side to avoid arm/wrist interference (for right-handed users)
-    panYSlider->setGeometry(
-        margin,  // At left edge of container
-        cornerOffset + margin,  // Below corner offset (for panX)
-        scrollbarWidth,
-        containerHeight - cornerOffset - margin * 2  // Full height minus corners
-    );
-    
-    // Ensure sliders are raised above content
-    panXSlider->raise();
-    panYSlider->raise();
-    
-    // Update action bar position
+    // SB1: The overlay scroll bars are now per-pane children of the viewport
+    // stacks (owned by SplitViewManager), so this method only repositions the
+    // remaining floating overlays that share the canvas container: the action
+    // bar and the PDF search bar. The name is kept for its existing callers
+    // (canvasContainer resize + initial layout).
     updateActionBarPosition();
-    
-    // Update PDF search bar position
     updatePdfSearchBarPosition();
 }
 
@@ -5864,7 +5597,12 @@ void MainWindow::connectSubToolbarSignals()
             Page* page = doc->page(vp->currentPageIndex());
             if (page) {
                 int pageIndex = doc->pageIndexByUuid(page->uuid);
-                if (pageIndex >= 0) doc->markPageDirty(pageIndex);
+                if (pageIndex >= 0) {
+                    doc->markPageDirty(pageIndex);
+                    // SB2: keep the marker cache in sync so the tick color
+                    // updates even after this page is later evicted.
+                    doc->refreshLinkOutlineFor(pageIndex);
+                }
             }
         }
         vp->update();
@@ -5873,6 +5611,8 @@ void MainWindow::connectSubToolbarSignals()
             // no collapse of expanded subtrees, no focus loss).
             markdownNotesSidebar->updateLinkObject(link->id, link->description, color);
         }
+        // SB2: recompute the scroll-bar document map (tick color changed).
+        if (m_splitViewManager) m_splitViewManager->updateScrollBarDocumentMap(vp);
     });
 
     // LinkObject description
@@ -5889,13 +5629,19 @@ void MainWindow::connectSubToolbarSignals()
             Page* page = doc->page(vp->currentPageIndex());
             if (page) {
                 int pageIndex = doc->pageIndexByUuid(page->uuid);
-                if (pageIndex >= 0) doc->markPageDirty(pageIndex);
+                if (pageIndex >= 0) {
+                    doc->markPageDirty(pageIndex);
+                    // SB2: keep the marker cache in sync (tooltip text changed).
+                    doc->refreshLinkOutlineFor(pageIndex);
+                }
             }
         }
         vp->update();
         if (markdownNotesSidebar && markdownNotesSidebar->isVisible()) {
             markdownNotesSidebar->updateLinkObject(link->id, description, link->iconColor);
         }
+        // SB2: recompute the scroll-bar document map (marker tooltip changed).
+        if (m_splitViewManager) m_splitViewManager->updateScrollBarDocumentMap(vp);
     });
 
     // Tab changes: per-tab state management via Toolbar (keyed by unique tab IDs).
@@ -6251,6 +5997,50 @@ void MainWindow::setupPdfSearch()
             &MainWindow::onSearchMatchFound);
     connect(m_searchEngine, &PdfSearchEngine::notFound, this,
             &MainWindow::onSearchNotFound);
+
+    // SBS2: debounced live whole-document scan driving the match count.
+    m_searchScanDebounce = new QTimer(this);
+    m_searchScanDebounce->setSingleShot(true);
+    m_searchScanDebounce->setInterval(250);
+    connect(m_searchScanDebounce, &QTimer::timeout, this, [this]() {
+        DocumentViewport *vp = currentViewport();
+        if (!vp || !m_searchEngine || !m_pdfSearchBar) {
+            return;
+        }
+        Document *doc = vp->document();
+        if (!doc) {
+            return;
+        }
+        m_searchEngine->setDocument(doc);
+        m_searchResultsByPage.clear();
+        m_searchTotalMatches = 0;
+        // SBS3: clear stale ticks; the new scan refills them as it streams.
+        if (m_searchMarkerRefresh) m_searchMarkerRefresh->stop();
+        if (m_splitViewManager) {
+            m_splitViewManager->clearScrollBarSearchMarkers(vp);
+        }
+        m_searchEngine->scanAllPages(m_pdfSearchBar->searchText(),
+                                     m_pdfSearchBar->caseSensitive(),
+                                     m_pdfSearchBar->wholeWord());
+    });
+
+    connect(m_pdfSearchBar, &PdfSearchBar::searchTextChanged, this,
+            &MainWindow::onSearchTextChanged);
+    connect(m_searchEngine, &PdfSearchEngine::pageScanned, this,
+            &MainWindow::onSearchScanPage);
+    connect(m_searchEngine, &PdfSearchEngine::scanComplete, this,
+            &MainWindow::onSearchScanComplete);
+
+    // SBS3: coalesce scroll-bar marker refreshes so streaming pageScanned
+    // events don't rebuild the full marker set on every page.
+    m_searchMarkerRefresh = new QTimer(this);
+    m_searchMarkerRefresh->setSingleShot(true);
+    m_searchMarkerRefresh->setInterval(200);
+    connect(m_searchMarkerRefresh, &QTimer::timeout, this, &MainWindow::refreshSearchMarkers);
+    if (m_splitViewManager) {
+        connect(m_splitViewManager, &SplitViewManager::searchMarkerActivated,
+                this, &MainWindow::onSearchMarkerActivated);
+    }
     
     // Position at bottom of viewport
     updatePdfSearchBarPosition();
@@ -6277,6 +6067,11 @@ void MainWindow::updatePdfSearchBarPosition()
     
     // Ensure it's raised above viewport content
     m_pdfSearchBar->raise();
+
+    // SB4: keep a bottom-docked cross-axis scroll bar clear of the search bar.
+    if (m_splitViewManager && m_pdfSearchBar->isVisible()) {
+        m_splitViewManager->setViewportBottomInset(barHeight);
+    }
 }
 
 void MainWindow::showPdfSearchBar()
@@ -6299,6 +6094,11 @@ void MainWindow::showPdfSearchBar()
     
     // Sync dark mode
     m_pdfSearchBar->setDarkMode(isDarkMode());
+
+    // SB4: reserve bottom space so a bottom-docked cross-axis bar clears it.
+    if (m_splitViewManager) {
+        m_splitViewManager->setViewportBottomInset(m_pdfSearchBar->height());
+    }
 }
 
 void MainWindow::hidePdfSearchBar()
@@ -6310,11 +6110,32 @@ void MainWindow::hidePdfSearchBar()
     // Cancel any ongoing search and clear cache to free memory
     if (m_searchEngine) {
         m_searchEngine->cancel();
+        m_searchEngine->cancelScan();  // SBS2: stop the whole-document scan too
         m_searchEngine->clearCache();
+    }
+
+    // SBS2: drop the streamed aggregate + debounce so a reopen starts fresh.
+    if (m_searchScanDebounce) {
+        m_searchScanDebounce->stop();
+    }
+    m_searchResultsByPage.clear();
+    m_searchTotalMatches = 0;
+    // SBS3: clear the scroll-bar search ticks.
+    if (m_searchMarkerRefresh) {
+        m_searchMarkerRefresh->stop();
+    }
+    if (m_splitViewManager) {
+        m_splitViewManager->clearScrollBarSearchMarkers(currentViewport());
     }
     
     m_pdfSearchBar->hide();
     m_pdfSearchBar->clearStatus();
+
+    // SB4: release the reserved bottom space so a bottom-docked cross-axis bar
+    // drops back to the edge.
+    if (m_splitViewManager) {
+        m_splitViewManager->setViewportBottomInset(0);
+    }
     
     // Clear search highlights from viewport
     if (DocumentViewport *vp = currentViewport()) {
@@ -6330,6 +6151,47 @@ void MainWindow::hidePdfSearchBar()
     if (DocumentViewport *vp = currentViewport()) {
         vp->setFocus();
     }
+}
+
+// ============================================================================
+// Scroll-bar placement settings (Plan SB4) - delegate to SplitViewManager
+// ============================================================================
+
+bool MainWindow::scrollBarVerticalOnRight() const
+{
+    return m_splitViewManager &&
+           m_splitViewManager->scrollBarVerticalEdge() == ViewportScrollBar::DockEdge::Right;
+}
+
+void MainWindow::setScrollBarVerticalOnRight(bool onRight)
+{
+    if (!m_splitViewManager) return;
+    m_splitViewManager->setScrollBarVerticalEdge(onRight ? ViewportScrollBar::DockEdge::Right
+                                                         : ViewportScrollBar::DockEdge::Left);
+}
+
+bool MainWindow::scrollBarHorizontalOnBottom() const
+{
+    return m_splitViewManager &&
+           m_splitViewManager->scrollBarHorizontalEdge() == ViewportScrollBar::DockEdge::Bottom;
+}
+
+void MainWindow::setScrollBarHorizontalOnBottom(bool onBottom)
+{
+    if (!m_splitViewManager) return;
+    m_splitViewManager->setScrollBarHorizontalEdge(onBottom ? ViewportScrollBar::DockEdge::Bottom
+                                                            : ViewportScrollBar::DockEdge::Top);
+}
+
+bool MainWindow::scrollBarsPinned() const
+{
+    return m_splitViewManager && m_splitViewManager->scrollBarsPinned();
+}
+
+void MainWindow::setScrollBarsPinned(bool pinned)
+{
+    if (!m_splitViewManager) return;
+    m_splitViewManager->setScrollBarsPinned(pinned);
 }
 
 void MainWindow::onSearchNext(const QString& text, bool caseSensitive, bool wholeWord)
@@ -6457,13 +6319,22 @@ void MainWindow::onSearchMatchFound(const PdfSearchMatch& match,
         vp->setSearchMatches(pageMatches, currentIdx, match.pageIndex);
 
     } else {
-        // Paged match (PdfText or OcrText): pageIndex is a notebook page index
-        vp->scrollToPage(match.pageIndex);
+        // Paged match (PdfText or OcrText): pageIndex is a notebook page index.
+        // SBS1: reveal the match's vertical position instead of parking the page
+        // top; skip scrolling when it's already visible to avoid jarring jumps.
+        const qreal normY = vp->searchMatchPageYFraction(match);
+        if (normY < 0.0) {
+            vp->scrollToPage(match.pageIndex);  // fallback for unmappable sources
+        } else if (!vp->isPagePositionVisible(match.pageIndex, normY)) {
+            vp->scrollToPositionOnPage(match.pageIndex, QPointF(-1.0, normY));
+        }
         vp->setSearchMatches(pageMatches, currentIdx, match.pageIndex);
     }
     
-    // Clear any previous "not found" status
-    m_pdfSearchBar->clearStatus();
+    // SBS2: keep the whole-document match count visible while navigating.
+    updateSearchCountStatus();
+    // SBS3: re-emphasize the current match's tick as Next/Prev moves it.
+    refreshSearchMarkers();
     
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "[MainWindow] Search match found: source=" << static_cast<int>(match.source)
@@ -6476,9 +6347,8 @@ void MainWindow::onSearchNotFound(bool wrapped)
 {
     Q_UNUSED(wrapped)
     
-    if (m_pdfSearchBar) {
-        m_pdfSearchBar->setStatus(tr("No results found"));
-    }
+    // SBS2: reflect the whole-document count (shows "No results found" at zero).
+    updateSearchCountStatus();
     
     // Clear any existing highlights
     if (DocumentViewport *vp = currentViewport()) {
@@ -6493,6 +6363,125 @@ void MainWindow::onSearchNotFound(bool wrapped)
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "[MainWindow] Search not found, wrapped:" << wrapped;
 #endif
+}
+
+// ============================================================================
+// SBS2: whole-document streaming scan (live match count)
+// ============================================================================
+
+void MainWindow::onSearchTextChanged(const QString& text)
+{
+    if (!m_searchEngine || !m_pdfSearchBar) {
+        return;
+    }
+
+    // Queries shorter than 2 chars are too broad: cancel + clear rather than
+    // scan the whole document on every keystroke.
+    if (text.trimmed().size() < 2) {
+        m_searchEngine->cancelScan();
+        if (m_searchScanDebounce) {
+            m_searchScanDebounce->stop();
+        }
+        m_searchResultsByPage.clear();
+        m_searchTotalMatches = 0;
+        m_pdfSearchBar->clearStatus();
+        // SBS3: drop the scroll-bar ticks along with the aggregate.
+        if (m_searchMarkerRefresh) m_searchMarkerRefresh->stop();
+        if (m_splitViewManager) {
+            m_splitViewManager->clearScrollBarSearchMarkers(currentViewport());
+        }
+        return;
+    }
+
+    // Coalesce rapid typing; the timeout launches the actual scan.
+    if (m_searchScanDebounce) {
+        m_searchScanDebounce->start();
+    }
+}
+
+void MainWindow::onSearchScanPage(int pageIndex, const QVector<PdfSearchMatch>& matches)
+{
+    // A page can only report once per scan, but guard against double-counting
+    // if it somehow re-fires (e.g. overlapping scans).
+    auto it = m_searchResultsByPage.find(pageIndex);
+    if (it != m_searchResultsByPage.end()) {
+        m_searchTotalMatches -= it.value().size();
+    }
+    m_searchResultsByPage.insert(pageIndex, matches);
+    m_searchTotalMatches += matches.size();
+    updateSearchCountStatus();
+    // SBS3: stream ticks in, coalesced so we don't rebuild on every page.
+    if (m_searchMarkerRefresh) m_searchMarkerRefresh->start();
+}
+
+void MainWindow::onSearchScanComplete(int totalMatches)
+{
+    m_searchTotalMatches = totalMatches;
+    updateSearchCountStatus();
+    // SBS3: final, authoritative marker rebuild.
+    if (m_searchMarkerRefresh) m_searchMarkerRefresh->stop();
+    refreshSearchMarkers();
+}
+
+void MainWindow::refreshSearchMarkers()
+{
+    if (!m_splitViewManager || !m_pdfSearchBar || !m_pdfSearchBar->isVisible()) {
+        return;
+    }
+    DocumentViewport* vp = currentViewport();
+    if (!vp) return;
+    const int curPage = m_searchState ? m_searchState->currentPageIndex : -1;
+    const int curMatch = m_searchState ? m_searchState->currentMatchIndex : -1;
+    m_splitViewManager->updateScrollBarSearchMarkers(vp, m_searchResultsByPage,
+                                                     curPage, curMatch);
+}
+
+void MainWindow::onSearchMarkerActivated(DocumentViewport* vp, int pageIndex,
+                                         qreal normY, int matchIndex)
+{
+    if (!vp || vp != currentViewport() || !m_searchState) {
+        return;
+    }
+
+    // Adopt the clicked match as the current one so Next/Prev continue from it.
+    const QVector<PdfSearchMatch> pageMatches = m_searchResultsByPage.value(pageIndex);
+    int idxWithinPage = -1;
+    for (int i = 0; i < pageMatches.size(); ++i) {
+        if (pageMatches[i].matchIndex == matchIndex) { idxWithinPage = i; break; }
+    }
+
+    m_searchState->currentPageIndex = pageIndex;
+    m_searchState->currentMatchIndex = matchIndex;
+    m_searchState->currentPageMatches = pageMatches;
+
+    // Reveal the exact match (SBS1 path), falling back to the page top.
+    if (normY < 0.0) {
+        vp->scrollToPage(pageIndex);
+    } else {
+        vp->scrollToPositionOnPage(pageIndex, QPointF(-1.0, normY));
+    }
+    vp->setSearchMatches(pageMatches, idxWithinPage, pageIndex);
+
+    refreshSearchMarkers();      // re-emphasize the now-current tick
+    updateSearchCountStatus();
+}
+
+void MainWindow::updateSearchCountStatus()
+{
+    if (!m_pdfSearchBar) {
+        return;
+    }
+    // Only show a status when there is an active query worth scanning.
+    const QString query = m_pdfSearchBar->searchText().trimmed();
+    if (query.size() < 2) {
+        m_pdfSearchBar->clearStatus();
+        return;
+    }
+    if (m_searchTotalMatches <= 0) {
+        m_pdfSearchBar->setStatus(tr("No results found"));
+    } else {
+        m_pdfSearchBar->setStatus(tr("%n match(es)", "", m_searchTotalMatches));
+    }
 }
 
 // =========================================================================

@@ -5,13 +5,21 @@
 #include "SplitViewManager.h"
 #include "TabBar.h"
 #include "TabManager.h"
+#include "widgets/ViewportScrollBar.h"
 #include "../core/DocumentViewport.h"
 #include "../core/Document.h"
+#include "../core/DarkModeUtils.h"
+#include "../pdf/PdfSearchEngine.h"  // SBS3: PdfSearchMatch for search-tick placement
 
 #include <QStackedWidget>
 #include <QMouseEvent>
+#include <QTabletEvent>
+#include <QPointingDevice>
 #include <QApplication>
 #include <QTimer>
+#include <QSettings>
+#include <QInputDevice>
+#include <QHash>
 
 // ============================================================================
 // Constructor / Destructor
@@ -73,11 +81,30 @@ SplitViewManager::SplitViewManager(QWidget* parent)
     });
 
     // Application-level event filter catches mouse/tablet/touch on ANY
-    // descendant widget (viewports, tab bars, etc.) for pane activation.
+    // descendant widget (viewports, tab bars, etc.) for pane activation
+    // and scroll-bar proximity/reposition (SB1).
     QApplication::instance()->installEventFilter(this);
 
     // No right pane initially
     m_activePane = Left;
+
+    // Enhanced scroll bars (SB1): read the persisted pin state, then create
+    // the always-present left pane's overlay bars.
+    {
+        QSettings settings;
+        m_scrollBarsPinned = settings.value(QStringLiteral("scrollbar/pinned"),
+                                             defaultScrollBarsPinned()).toBool();
+        // SB4: docked edges (page-axis Left/Right, cross-axis Top/Bottom).
+        m_vEdge = settings.value(QStringLiteral("scrollbar/verticalEdge"),
+                                 QStringLiteral("Left")).toString() == QLatin1String("Right")
+                      ? ViewportScrollBar::DockEdge::Right
+                      : ViewportScrollBar::DockEdge::Left;
+        m_hEdge = settings.value(QStringLiteral("scrollbar/horizontalEdge"),
+                                 QStringLiteral("Top")).toString() == QLatin1String("Bottom")
+                      ? ViewportScrollBar::DockEdge::Bottom
+                      : ViewportScrollBar::DockEdge::Top;
+    }
+    createScrollBars(Left);
 }
 
 SplitViewManager::~SplitViewManager()
@@ -259,6 +286,7 @@ void SplitViewManager::updateTheme(bool darkMode, const QColor& accentColor)
     m_accentColor = accentColor;
     if (m_leftTabBar) m_leftTabBar->updateTheme(darkMode, accentColor);
     if (m_rightTabBar) m_rightTabBar->updateTheme(darkMode, accentColor);
+    applyScrollBarDarkMode();
     updateActivePaneIndicator();
 }
 
@@ -271,6 +299,7 @@ QSplitter* SplitViewManager::viewportSplitter() const { return m_splitter; }
 
 void SplitViewManager::onLeftViewportChanged(DocumentViewport* vp)
 {
+    bindScrollBars(Left, vp);
     if (m_activePane == Left) {
         emit activeViewportChanged(vp);
     }
@@ -278,6 +307,7 @@ void SplitViewManager::onLeftViewportChanged(DocumentViewport* vp)
 
 void SplitViewManager::onRightViewportChanged(DocumentViewport* vp)
 {
+    bindScrollBars(Right, vp);
     if (m_activePane == Right) {
         emit activeViewportChanged(vp);
     }
@@ -360,6 +390,9 @@ void SplitViewManager::createRightPane()
     m_leftTabBar->setMergeEnabled(true);
     m_rightTabBar->setMergeEnabled(true);
 
+    // SB1: give the new pane its own overlay scroll bars, bound to its viewport.
+    createScrollBars(Right);
+
     updateActivePaneIndicator();
     emit splitStateChanged(true);
 }
@@ -371,6 +404,9 @@ void SplitViewManager::destroyRightPane()
 
     if (m_activePane == Right)
         m_activePane = Left;
+
+    // SB1: tear down the right pane's overlay bars before the stack is deleted.
+    destroyScrollBars(Right);
 
     // Disconnect all signals so no stale emissions occur
     disconnect(m_rightTabManager, nullptr, this, nullptr);
@@ -478,34 +514,577 @@ void SplitViewManager::recenterAllViewports()
 
 bool SplitViewManager::eventFilter(QObject* watched, QEvent* event)
 {
-    // Only process input-initiating events
-    switch (event->type()) {
+    const QEvent::Type type = event->type();
+
+    // SB1: keep overlay bars laid out when a pane stack resizes or is shown.
+    if (type == QEvent::Resize || type == QEvent::Show) {
+        if (watched == m_leftViewportStack) {
+            repositionScrollBars(Left);
+        } else if (m_rightViewportStack && watched == m_rightViewportStack) {
+            repositionScrollBars(Right);
+        }
+    }
+
+    // SB1: pen/mouse proximity floats the bars in (palm-rejected inside).
+    if (type == QEvent::MouseMove || type == QEvent::TabletMove) {
+        proximityFloatCheck(event);
+    }
+
+    // Pane activation on any interaction (only meaningful when split).
+    switch (type) {
     case QEvent::MouseButtonPress:
     case QEvent::TabletPress:
     case QEvent::TouchBegin:
+        if (isSplit()) {
+            if (QWidget* target = qobject_cast<QWidget*>(watched)) {
+                // Walk up the parent chain to find the owning pane.
+                for (QWidget* w = target; w != nullptr; w = w->parentWidget()) {
+                    if (w == m_leftViewportStack || w == m_leftTabBar) {
+                        setActivePane(Left);
+                        break;
+                    }
+                    if (w == m_rightViewportStack || w == m_rightTabBar) {
+                        setActivePane(Right);
+                        break;
+                    }
+                }
+            }
+        }
         break;
     default:
-        return QWidget::eventFilter(watched, event);
-    }
-
-    if (!isSplit())
-        return QWidget::eventFilter(watched, event);
-
-    QWidget* target = qobject_cast<QWidget*>(watched);
-    if (!target)
-        return QWidget::eventFilter(watched, event);
-
-    // Walk up the parent chain to determine which pane the widget belongs to
-    for (QWidget* w = target; w != nullptr; w = w->parentWidget()) {
-        if (w == m_leftViewportStack || w == m_leftTabBar) {
-            setActivePane(Left);
-            break;
-        }
-        if (w == m_rightViewportStack || w == m_rightTabBar) {
-            setActivePane(Right);
-            break;
-        }
+        break;
     }
 
     return QWidget::eventFilter(watched, event);
+}
+
+// ============================================================================
+// Enhanced scroll bars (Plan SB1)
+// ============================================================================
+
+bool SplitViewManager::defaultScrollBarsPinned()
+{
+    // Default to pinned (always visible) when a physical keyboard is present,
+    // matching the pre-SB1 keyboard-keyed visibility behavior.
+    const auto devices = QInputDevice::devices();
+    for (const QInputDevice* device : devices) {
+        if (device && device->type() == QInputDevice::DeviceType::Keyboard) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QStackedWidget* SplitViewManager::stackForPane(Pane pane) const
+{
+    return (pane == Left) ? m_leftViewportStack : m_rightViewportStack;
+}
+
+DocumentViewport* SplitViewManager::viewportForPane(Pane pane) const
+{
+    TabManager* tm = (pane == Left) ? m_leftTabManager : m_rightTabManager;
+    return tm ? tm->currentViewport() : nullptr;
+}
+
+void SplitViewManager::createScrollBars(Pane pane)
+{
+    QStackedWidget* stack = stackForPane(pane);
+    if (!stack) return;
+
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (b.vBar) return;  // already created
+
+    b.vBar = new ViewportScrollBar(Qt::Vertical, m_vEdge, stack);
+    b.hBar = new ViewportScrollBar(Qt::Horizontal, m_hEdge, stack);
+    b.vBar->setDarkMode(m_darkMode);
+    b.hBar->setDarkMode(m_darkMode);
+
+    b.fadeTimer = new QTimer(this);
+    b.fadeTimer->setSingleShot(true);
+    b.fadeTimer->setInterval(2500);  // ~2.5s of inactivity before fade-out
+    connect(b.fadeTimer, &QTimer::timeout, this, [this, pane]() {
+        hideScrollBars(pane);
+    });
+
+    // Initial visibility follows the pin state.
+    b.vBar->setVisible(m_scrollBarsPinned);
+    b.hBar->setVisible(m_scrollBarsPinned);
+
+    repositionScrollBars(pane);
+    bindScrollBars(pane, viewportForPane(pane));
+}
+
+void SplitViewManager::destroyScrollBars(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    disconnect(b.cViewToV);
+    disconnect(b.cViewToH);
+    disconnect(b.cVToView);
+    disconnect(b.cHToView);
+    disconnect(b.cMarker);
+    disconnect(b.cSearchMarker);
+    if (b.fadeTimer) { b.fadeTimer->stop(); delete b.fadeTimer; }
+    delete b.vBar;
+    delete b.hBar;
+    b = PaneBars{};
+}
+
+void SplitViewManager::repositionScrollBars(Pane pane)
+{
+    QStackedWidget* stack = stackForPane(pane);
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (!stack || !b.vBar || !b.hBar) return;
+
+    const int thickness = ViewportScrollBar::barThickness();
+    const int margin = 3;
+    const int corner = 15;  // gap where the two bars would meet
+    const int w = stack->width();
+    const int h = stack->height();
+
+    const bool vRight  = (m_vEdge == ViewportScrollBar::DockEdge::Right);
+    const bool hBottom = (m_hEdge == ViewportScrollBar::DockEdge::Bottom);
+
+    // Vertical (page-axis) bar: docked left or right, spanning the height with
+    // the corner reserved at the end the horizontal bar occupies.
+    const int vX = vRight ? (w - thickness - margin) : margin;
+    const int vY = hBottom ? margin : (corner + margin);
+    const int vBottomReserve = hBottom ? m_bottomInset : 0;
+    b.vBar->setGeometry(vX,
+                        vY,
+                        thickness,
+                        qMax(0, h - corner - margin * 2 - vBottomReserve));
+
+    // Horizontal (cross-axis) bar: docked top or bottom, spanning the width with
+    // the corner reserved at the end the vertical bar occupies. When docked at
+    // the bottom it is lifted by m_bottomInset to clear the search bar (SB4).
+    const int hX = vRight ? margin : (corner + margin);
+    const int hY = hBottom ? (h - thickness - margin - m_bottomInset) : margin;
+    b.hBar->setGeometry(hX,
+                        hY,
+                        qMax(0, w - corner - margin * 2),
+                        thickness);
+    b.vBar->raise();
+    b.hBar->raise();
+}
+
+void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (!b.vBar || !b.hBar) return;
+
+    // Drop connections to the previous viewport.
+    disconnect(b.cViewToV);
+    disconnect(b.cViewToH);
+    disconnect(b.cVToView);
+    disconnect(b.cHToView);
+    disconnect(b.cMarker);
+    disconnect(b.cSearchMarker);
+    b.cViewToV = b.cViewToH = b.cVToView = b.cHToView = b.cMarker
+              = b.cSearchMarker = QMetaObject::Connection{};
+
+    b.bound = vp;
+    if (!vp) return;
+
+    // Initialize handle sizes and positions from the viewport's current state.
+    refreshHandleSizes(pane);
+    {
+        qreal zoom = vp->zoomLevel();
+        if (zoom <= 0) zoom = 1.0;
+        const QPointF panOffset = vp->panOffset();
+        const QSizeF content = vp->totalContentSize();
+        const qreal viewW = vp->width() / zoom;
+        const qreal viewH = vp->height() / zoom;
+        const qreal scrollW = content.width() - viewW;
+        const qreal scrollH = content.height() - viewH;
+        b.vBar->setFraction(scrollH > 0 ? qBound(0.0, panOffset.y() / scrollH, 1.0) : 0.0);
+        b.hBar->setFraction(scrollW > 0 ? qBound(0.0, panOffset.x() / scrollW, 1.0) : 0.0);
+    }
+
+    // Viewport -> bar (programmatic; does not feed back).
+    b.cViewToV = connect(vp, &DocumentViewport::verticalScrollChanged, this,
+                         [this, pane](qreal f) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (!pb.vBar) return;
+        refreshHandleSizes(pane);
+        pb.vBar->setFraction(f);
+        showScrollBars(pane);  // float in during active scroll
+    });
+    b.cViewToH = connect(vp, &DocumentViewport::horizontalScrollChanged, this,
+                         [this, pane](qreal f) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (!pb.hBar) return;
+        refreshHandleSizes(pane);
+        pb.hBar->setFraction(f);
+        showScrollBars(pane);
+    });
+
+    // Bar -> viewport (user interaction only).
+    b.cVToView = connect(b.vBar, &ViewportScrollBar::fractionChanged, this,
+                         [this, pane](qreal f) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (pb.bound) pb.bound->setVerticalScrollFraction(f);
+    });
+    b.cHToView = connect(b.hBar, &ViewportScrollBar::fractionChanged, this,
+                         [this, pane](qreal f) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (pb.bound) pb.bound->setHorizontalScrollFraction(f);
+    });
+
+    // SB2: clicking a link marker jumps the bound viewport to that page.
+    b.cMarker = connect(b.vBar, &ViewportScrollBar::markerActivated, this,
+                        [this, pane](int pageIndex) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (pb.bound && pageIndex >= 0) pb.bound->scrollToPage(pageIndex);
+    });
+
+    // SBS3: forward a search-tick click up to MainWindow (tagged with the vp)
+    // so it can reveal + select the exact match and keep Next/Prev in sync.
+    b.cSearchMarker = connect(b.vBar, &ViewportScrollBar::searchMarkerActivated, this,
+                              [this, pane](int pageIndex, qreal normY, int matchIndex) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (pb.bound) emit searchMarkerActivated(pb.bound, pageIndex, normY, matchIndex);
+    });
+
+    // SB2: compute the per-source accent + link-marker document map now.
+    updateScrollBarDocumentMap(vp);
+
+    // Keep the bars above the (possibly newly shown) viewport.
+    b.vBar->raise();
+    b.hBar->raise();
+}
+
+void SplitViewManager::updateScrollBarDocumentMap(DocumentViewport* vp)
+{
+    if (!vp) return;
+
+    // Find the pane currently bound to this viewport.
+    int paneIdx = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].bound == vp) { paneIdx = i; break; }
+    }
+    if (paneIdx < 0) return;
+
+    PaneBars& b = m_paneBars[paneIdx];
+    if (!b.vBar) return;
+
+    Document* doc = vp->document();
+    if (!doc) {
+        b.vBar->setAccentRegions({});
+        b.vBar->setMarkers({});
+        return;
+    }
+
+    // --- Per-source accent bands ---------------------------------------
+    // Single-source (or plain) documents get no stripes: parity with SB1.
+    QVector<ViewportScrollBar::AccentRegion> accents;
+    const QStringList order = doc->sourceDisplayOrder();
+    if (order.size() > 1) {
+        // The palette slot IS the index in sourceDisplayOrder(); precompute a
+        // lookup so the per-page loop stays O(pages) instead of calling
+        // paletteSlotForSource() (which rebuilds the order list every call).
+        QHash<QString, int> slotOf;
+        slotOf.reserve(order.size());
+        for (int i = 0; i < order.size(); ++i) slotOf.insert(order[i], i);
+
+        const int pageCount = doc->pageCount();
+        int runStart = -1;
+        int runSlot = -2;  // -2 = no active run
+        auto flushRun = [&](int runEnd) {
+            if (runSlot < 0 || runStart < 0) return;  // plain-page run: no stripe
+            const qreal start = vp->pageTrackFraction(runStart);
+            const qreal end = vp->pageTrackFraction(runEnd + 1);  // bottom of last page
+            if (start >= 0.0 && end > start) {
+                const QColor c = DarkModeUtils::sourceAccentColor(runSlot, m_darkMode);
+                if (c.isValid()) accents.push_back({ start, end, c });
+            }
+        };
+        for (int i = 0; i < pageCount; ++i) {
+            QString srcId;
+            int pdfPage = -1;
+            int slot = -1;  // plain page
+            if (doc->pdfBindingForNotebookPage(i, srcId, pdfPage)) {
+                slot = slotOf.value(srcId, -1);
+            }
+            if (slot != runSlot) {
+                flushRun(i - 1);
+                runSlot = slot;
+                runStart = i;
+            }
+        }
+        flushRun(pageCount - 1);
+    }
+    b.vBar->setAccentRegions(accents);
+
+    // --- Link markers ---------------------------------------------------
+    QVector<ViewportScrollBar::BarMarker> markers;
+    const QVector<Document::PageLinkMarker> pageMarkers = doc->pageLinkMarkers();
+    markers.reserve(pageMarkers.size());
+    for (const Document::PageLinkMarker& pm : pageMarkers) {
+        const qreal frac = vp->pageTrackFraction(pm.pageIndex);
+        if (frac < 0.0) continue;
+        ViewportScrollBar::BarMarker m;
+        m.pos = frac;
+        m.color = pm.color;
+        m.pageIndex = pm.pageIndex;
+        m.kind = ViewportScrollBar::MarkerKind::Link;
+        m.tooltip = pm.description;
+        markers.push_back(std::move(m));
+    }
+    b.vBar->setMarkers(markers);
+}
+
+void SplitViewManager::updateScrollBarSearchMarkers(
+    DocumentViewport* vp,
+    const QHash<int, QVector<PdfSearchMatch>>& resultsByPage,
+    int currentPage,
+    int currentMatchIndex)
+{
+    if (!vp) return;
+
+    int paneIdx = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].bound == vp) { paneIdx = i; break; }
+    }
+    if (paneIdx < 0) return;
+
+    PaneBars& b = m_paneBars[paneIdx];
+    if (!b.vBar) return;
+
+    Document* doc = vp->document();
+    if (!doc || doc->isEdgeless() || resultsByPage.isEmpty()) {
+        b.vBar->clearSearchMarkers();
+        return;
+    }
+
+    // A global cap keeps huge result sets cheap to build/paint. Beyond it we
+    // coarsen to one tick per page (page-top) that still counts all matches.
+    static constexpr int kSearchMarkerCap = 2000;
+    int totalMatches = 0;
+    for (auto it = resultsByPage.constBegin(); it != resultsByPage.constEnd(); ++it) {
+        totalMatches += it.value().size();
+    }
+    const bool coarsen = totalMatches > kSearchMarkerCap;
+
+    QVector<ViewportScrollBar::BarMarker> raw;
+    raw.reserve(coarsen ? resultsByPage.size() : totalMatches);
+
+    for (auto it = resultsByPage.constBegin(); it != resultsByPage.constEnd(); ++it) {
+        const int page = it.key();
+        const QVector<PdfSearchMatch>& matches = it.value();
+        if (matches.isEmpty()) continue;
+
+        const qreal f0 = vp->pageTrackFraction(page);
+        if (f0 < 0.0) continue;  // unmappable (e.g. layout not ready)
+        const qreal f1 = vp->pageTrackFraction(page + 1);
+        const qreal span = (f1 > f0) ? (f1 - f0) : 0.0;
+
+        if (coarsen) {
+            // One page-level tick summarizing the whole page.
+            const PdfSearchMatch& first = matches.first();
+            ViewportScrollBar::BarMarker m;
+            m.pos = f0;
+            m.kind = ViewportScrollBar::MarkerKind::SearchHit;
+            m.pageIndex = page;
+            m.matchIndex = first.matchIndex;
+            m.normY = 0.0;
+            m.matchCount = matches.size();
+            m.current = (page == currentPage);
+            raw.push_back(std::move(m));
+            continue;
+        }
+
+        for (const PdfSearchMatch& match : matches) {
+            const qreal normY = vp->searchMatchPageYFraction(match);
+            if (normY < 0.0) continue;  // tile/edgeless source: no page-axis pos
+            ViewportScrollBar::BarMarker m;
+            m.pos = f0 + normY * span;
+            m.kind = ViewportScrollBar::MarkerKind::SearchHit;
+            m.pageIndex = page;
+            m.matchIndex = match.matchIndex;
+            m.normY = normY;
+            m.matchCount = 1;
+            m.current = (page == currentPage && match.matchIndex == currentMatchIndex);
+            raw.push_back(std::move(m));
+        }
+    }
+
+    b.vBar->setSearchMarkers(raw);
+}
+
+void SplitViewManager::clearScrollBarSearchMarkers(DocumentViewport* vp)
+{
+    if (!vp) return;
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].bound == vp && m_paneBars[i].vBar) {
+            m_paneBars[i].vBar->clearSearchMarkers();
+            return;
+        }
+    }
+}
+
+void SplitViewManager::refreshHandleSizes(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    DocumentViewport* vp = b.bound;
+    if (!vp || !b.vBar || !b.hBar) return;
+
+    qreal zoom = vp->zoomLevel();
+    if (zoom <= 0) zoom = 1.0;
+    const QSizeF content = vp->totalContentSize();
+    if (content.width() <= 0 || content.height() <= 0) return;
+
+    const qreal viewW = vp->width() / zoom;
+    const qreal viewH = vp->height() / zoom;
+    b.vBar->setHandleFraction(qBound(0.0, viewH / content.height(), 1.0));
+    b.hBar->setHandleFraction(qBound(0.0, viewW / content.width(), 1.0));
+}
+
+void SplitViewManager::showScrollBars(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (!b.vBar || !b.hBar) return;
+
+    if (!b.vBar->isVisible()) { b.vBar->setVisible(true); b.vBar->raise(); }
+    if (!b.hBar->isVisible()) { b.hBar->setVisible(true); b.hBar->raise(); }
+
+    // When pinned, the bars stay up; otherwise (re)start the fade timer.
+    if (m_scrollBarsPinned) {
+        if (b.fadeTimer) b.fadeTimer->stop();
+    } else if (b.fadeTimer) {
+        b.fadeTimer->start();
+    }
+}
+
+void SplitViewManager::hideScrollBars(Pane pane)
+{
+    if (m_scrollBarsPinned) return;
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    // Never hide while the user is actively dragging a handle.
+    if (b.vBar && b.vBar->isDragging()) return;
+    if (b.hBar && b.hBar->isDragging()) return;
+    if (b.vBar) b.vBar->setVisible(false);
+    if (b.hBar) b.hBar->setVisible(false);
+}
+
+void SplitViewManager::applyScrollBarDarkMode()
+{
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].vBar) m_paneBars[i].vBar->setDarkMode(m_darkMode);
+        if (m_paneBars[i].hBar) m_paneBars[i].hBar->setDarkMode(m_darkMode);
+        // SB2 accent colors are theme-dependent, so recompute the document map.
+        if (m_paneBars[i].bound) updateScrollBarDocumentMap(m_paneBars[i].bound);
+    }
+}
+
+void SplitViewManager::setScrollBarsPinned(bool pinned)
+{
+    if (m_scrollBarsPinned == pinned) {
+        return;
+    }
+    m_scrollBarsPinned = pinned;
+    QSettings().setValue(QStringLiteral("scrollbar/pinned"), pinned);
+
+    for (int i = 0; i < 2; ++i) {
+        PaneBars& b = m_paneBars[i];
+        if (!b.vBar) continue;
+        if (pinned) {
+            if (b.fadeTimer) b.fadeTimer->stop();
+            b.vBar->setVisible(true);
+            b.hBar->setVisible(true);
+            b.vBar->raise();
+            b.hBar->raise();
+        } else if (b.fadeTimer) {
+            b.fadeTimer->start();  // begin fading the currently-shown bars
+        }
+    }
+}
+
+void SplitViewManager::setScrollBarVerticalEdge(ViewportScrollBar::DockEdge edge)
+{
+    if (edge != ViewportScrollBar::DockEdge::Left &&
+        edge != ViewportScrollBar::DockEdge::Right) {
+        return;  // page-axis bar only lives on the left/right edges
+    }
+    if (m_vEdge == edge) return;
+    m_vEdge = edge;
+    QSettings().setValue(QStringLiteral("scrollbar/verticalEdge"),
+                         edge == ViewportScrollBar::DockEdge::Right
+                             ? QStringLiteral("Right") : QStringLiteral("Left"));
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].vBar) m_paneBars[i].vBar->setDockEdge(edge);
+        repositionScrollBars(static_cast<Pane>(i));
+    }
+}
+
+void SplitViewManager::setScrollBarHorizontalEdge(ViewportScrollBar::DockEdge edge)
+{
+    if (edge != ViewportScrollBar::DockEdge::Top &&
+        edge != ViewportScrollBar::DockEdge::Bottom) {
+        return;  // cross-axis bar only lives on the top/bottom edges
+    }
+    if (m_hEdge == edge) return;
+    m_hEdge = edge;
+    QSettings().setValue(QStringLiteral("scrollbar/horizontalEdge"),
+                         edge == ViewportScrollBar::DockEdge::Bottom
+                             ? QStringLiteral("Bottom") : QStringLiteral("Top"));
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].hBar) m_paneBars[i].hBar->setDockEdge(edge);
+        repositionScrollBars(static_cast<Pane>(i));
+    }
+}
+
+void SplitViewManager::setViewportBottomInset(int px)
+{
+    px = qMax(0, px);
+    if (m_bottomInset == px) return;
+    m_bottomInset = px;
+    repositionScrollBars(Left);
+    if (isSplit()) repositionScrollBars(Right);
+}
+
+void SplitViewManager::proximityFloatCheck(QEvent* event)
+{
+    // Palm rejection: only a real pen (tablet) or a non-finger mouse may arm
+    // the float. Touch-synthesized mouse moves are ignored.
+    QPointF globalPos;
+    if (event->type() == QEvent::TabletMove) {
+        globalPos = static_cast<QTabletEvent*>(event)->globalPosition();
+    } else {
+        QMouseEvent* me = static_cast<QMouseEvent*>(event);
+        if (me->pointerType() == QPointingDevice::PointerType::Finger) {
+            return;
+        }
+        globalPos = me->globalPosition();
+    }
+
+    checkPaneProximity(Left, globalPos);
+    if (isSplit()) {
+        checkPaneProximity(Right, globalPos);
+    }
+}
+
+void SplitViewManager::checkPaneProximity(Pane pane, const QPointF& globalPos)
+{
+    QStackedWidget* stack = stackForPane(pane);
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (!stack || !b.vBar || !stack->isVisible()) return;
+
+    const QPoint local = stack->mapFromGlobal(globalPos.toPoint());
+    if (!stack->rect().contains(local)) return;
+
+    // Arm when the pointer is near the docked edges the bars actually live on
+    // (SB4: left/right for the vertical bar, top/bottom for the horizontal bar),
+    // including the region the bars themselves occupy.
+    const int threshold = 24;
+    const int w = stack->width();
+    const int h = stack->height();
+    const bool nearVEdge = (m_vEdge == ViewportScrollBar::DockEdge::Right)
+                               ? (local.x() >= w - threshold)
+                               : (local.x() <= threshold);
+    const bool nearHEdge = (m_hEdge == ViewportScrollBar::DockEdge::Bottom)
+                               ? (local.y() >= h - threshold)
+                               : (local.y() <= threshold);
+    if (nearVEdge || nearHEdge) {
+        showScrollBars(pane);
+    }
 }

@@ -12,8 +12,10 @@
 #include <QPointer>
 #include <QScrollBar>
 #include <QSet>
+#include <QHash>
 #include <set>
 #include <QSpinBox>
+#include "pdf/PdfSearchEngine.h"  // SBS2: PdfSearchMatch complete type for scan aggregate
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
 #include "SDLControllerManager.h"
 #endif
@@ -131,6 +133,17 @@ public:
     int getPalmRejectionDelay() const;
     void setPalmRejectionDelay(int delayMs);
 #endif
+
+    // Scroll-bar placement settings (Plan SB4); delegate to SplitViewManager.
+    // Page-axis (vertical) bar: false = left edge, true = right edge.
+    bool scrollBarVerticalOnRight() const;
+    void setScrollBarVerticalOnRight(bool onRight);
+    // Cross-axis (horizontal) bar: false = top edge, true = bottom edge.
+    bool scrollBarHorizontalOnBottom() const;
+    void setScrollBarHorizontalOnBottom(bool onBottom);
+    // Keep bars pinned (visible; disables proximity auto-hide).
+    bool scrollBarsPinned() const;
+    void setScrollBarsPinned(bool pinned);
 
     // OCR language query (for ControlPanelDialog and per-document dialog)
     QStringList ocrAvailableLanguages() const { return m_ocrAvailableLanguages; }
@@ -366,10 +379,6 @@ private slots:
     
     // Keyboard Shortcut Hub: Handle shortcut changes from ShortcutManager
     void onShortcutChanged(const QString& actionId, const QString& newShortcut);
-
-    void updatePanX(int value);
-    void updatePanY(int value);
-
 
     void forceUIRefresh();
 
@@ -616,9 +625,6 @@ private:
     QMenu *overflowMenu;
     QAction* m_relinkPdfAction = nullptr;  // Phase R.4: Relink PDF menu action
     QAction* m_exportPdfAction = nullptr;  // Phase 8: Export to PDF menu action
-    QScrollBar *panXSlider;
-    QScrollBar *panYSlider;
-
 
     // QListWidget *tabList;          // Horizontal tab bar
     // QStackedWidget *canvasStack;   // Holds multiple InkCanvas instances
@@ -650,6 +656,13 @@ private:
     PdfSearchBar *m_pdfSearchBar = nullptr;
     PdfSearchEngine *m_searchEngine = nullptr;
     std::unique_ptr<PdfSearchState> m_searchState;
+
+    // SBS2: whole-document streaming scan (live match count + SBS3 marker store)
+    QTimer *m_searchScanDebounce = nullptr;
+    QHash<int, QVector<PdfSearchMatch>> m_searchResultsByPage;
+    int m_searchTotalMatches = 0;
+    // SBS3: coalesces scroll-bar search-marker refreshes during streaming
+    QTimer *m_searchMarkerRefresh = nullptr;
     
     // OCR
     QThread *m_ocrThread = nullptr;
@@ -732,18 +745,6 @@ private:
 
     void loadUserSettings();
 
-    bool scrollbarsVisible = false;
-    QTimer *scrollbarHideTimer = nullptr;
-    bool m_hasKeyboard = false;  // MW5.8: Cached keyboard detection result
-    
-    // MW5.8: Keyboard detection and scrollbar visibility
-    bool hasPhysicalKeyboard();   // Check if physical keyboard is connected
-    void showScrollbars();        // Show scrollbars and reset hide timer
-    void hideScrollbars();        // Hide scrollbars
-    
-    // Phase 3.3: Viewport scroll signal connections (for proper cleanup)
-    QMetaObject::Connection m_hScrollConn;
-    QMetaObject::Connection m_vScrollConn;
     QPointer<DocumentViewport> m_connectedViewport;  // QPointer for safe dangling check
     
     // CR-2B: Tool/mode signal connections (for keyboard shortcut sync)
@@ -839,6 +840,14 @@ private:
     void onSearchPrev(const QString& text, bool caseSensitive, bool wholeWord);
     void onSearchMatchFound(const PdfSearchMatch& match, const QVector<PdfSearchMatch>& pageMatches);
     void onSearchNotFound(bool wrapped);
+    // SBS2: live whole-document scan (debounced) + streamed aggregation
+    void onSearchTextChanged(const QString& text);
+    void onSearchScanPage(int pageIndex, const QVector<PdfSearchMatch>& matches);
+    void onSearchScanComplete(int totalMatches);
+    void updateSearchCountStatus();    // Reflect m_searchTotalMatches in the bar
+    // SBS3: scroll-bar search-hit ticks
+    void refreshSearchMarkers();       // Push current aggregate to the active bar
+    void onSearchMarkerActivated(DocumentViewport* vp, int pageIndex, qreal normY, int matchIndex);
     
     // OCR
     void setupOcr();

@@ -487,6 +487,26 @@ public:
      */
     QVector<LinkOutlineEntry> enumerateLinkOutline() const;
 
+    /**
+     * @brief One scroll-bar tick per page that owns at least one LinkObject.
+     *
+     * SB2 document map: unlike enumerateLinkOutline() (markdown-only, tree
+     * building), this reduces EVERY page that carries any LinkObject to a
+     * single marker at its topmost link (smallest local Y), for painting on
+     * the enhanced scroll bar. Backed by the all-links marker cache
+     * (`m_pageMarkers`) which shares invalidation with the outline cache, so
+     * it costs no extra I/O on the hot path and never force-loads a page
+     * (unloaded pages are peeked from disk). Paged-mode only; edgeless returns
+     * an empty list.
+     */
+    struct PageLinkMarker {
+        int pageIndex = -1;   ///< 0-based notebook page index.
+        qreal localY = 0.0;   ///< Y of the topmost link in page-local coords.
+        QColor color;         ///< iconColor of the topmost link (raw; may be default-gray).
+        QString description;  ///< Tooltip text of the topmost link.
+    };
+    QVector<PageLinkMarker> pageLinkMarkers() const;
+
     // ========================================================================
     // Link Outline Cache (Phase M.9)
     // ========================================================================
@@ -1969,7 +1989,8 @@ private:
                                 int pageIdx,
                                 int tileX,
                                 int tileY,
-                                bool edgeless);
+                                bool edgeless,
+                                bool requireMarkdown = true);
 
     /**
      * @brief Read a tile's JSON on disk and extract just the LinkObject
@@ -1980,11 +2001,11 @@ private:
      * `m_tileIndex`).  Safe to call on const paths.
      */
     QVector<LinkOutlineEntry>
-    peekTileLinkOutlineFromDisk(TileCoord coord) const;
+    peekTileLinkOutlineFromDisk(TileCoord coord, bool requireMarkdown = true) const;
 
     /// Paged-mode counterpart of `peekTileLinkOutlineFromDisk`.
     QVector<LinkOutlineEntry>
-    peekPageLinkOutlineFromDisk(int pageIndex) const;
+    peekPageLinkOutlineFromDisk(int pageIndex, bool requireMarkdown = true) const;
 
     /**
      * @brief Shared JSON → outline-entry walker used by both peek helpers.
@@ -1998,7 +2019,8 @@ private:
                                        int  pageIndex,
                                        int  tileX,
                                        int  tileY,
-                                       const QPointF& tileOrigin);
+                                       const QPointF& tileOrigin,
+                                       bool requireMarkdown = true);
 
     /// Cache contents, keyed by container.  Empty vectors are allowed
     /// and mean "container exists but has no markdown-backed links."
@@ -2007,4 +2029,18 @@ private:
     mutable std::map<int, QVector<LinkOutlineEntry>>       m_pageOutline;
     mutable std::map<TileCoord, QVector<LinkOutlineEntry>> m_tileOutline;
     mutable bool m_linkOutlineCacheReady = false;
+
+    // ------------------------------------------------------------------
+    // SB2 all-links marker cache (paged mode only).
+    // Parallel to m_pageOutline but built with requireMarkdown=false, so it
+    // holds EVERY LinkObject (not just markdown-backed ones). Shares the
+    // same invalidation call sites (refreshLinkOutlineFor / dropLinkOutlineFor
+    // / clearLinkOutlineCache); each keeps its own ready flag so either cache
+    // can be populated independently on first use.
+    // ------------------------------------------------------------------
+    mutable std::map<int, QVector<LinkOutlineEntry>> m_pageMarkers;
+    mutable bool m_markerCacheReady = false;
+
+    /// Build (or rebuild) m_pageMarkers in one pass (paged mode only).
+    void buildMarkerCache() const;
 };

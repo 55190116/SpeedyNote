@@ -870,6 +870,23 @@ public:
      * @return Size of the content area containing all pages.
      */
     QSizeF totalContentSize() const;
+
+    /**
+     * @brief Normalized track position (0.0-1.0) of a page's top edge.
+     *
+     * SB2: maps a notebook page index to the same 0.0-1.0 space the vertical
+     * scroll-bar handle's top uses, so a marker/accent painted at this fraction
+     * lands exactly where the handle sits when that page reaches the top.
+     * Derived from the cumulative per-page Y offsets and total content height
+     * (content coordinates, so zoom-independent), using page-size metadata only
+     * -- no page content is loaded.
+     *
+     * @param pageIndex 0-based page index. Values <= 0 return 0.0; values >=
+     *        pageCount return 1.0 (bottom of the last page).
+     * @return Track fraction in [0.0, 1.0], or -1.0 when there is no layout
+     *         (edgeless mode or zero content height).
+     */
+    qreal pageTrackFraction(int pageIndex) const;
     
     /**
      * @brief Find which page contains a point in document coordinates.
@@ -1483,6 +1500,27 @@ public slots:
      * PDF outlines often specify exact positions using normalized coordinates.
      */
     void scrollToPositionOnPage(int pageIndex, QPointF normalizedPosition);
+
+    /**
+     * @brief Page-local Y fraction [0..1] of a search match's center (SBS1).
+     * @param match A search match.
+     * @return Normalized Y within the match's page, or -1 when unavailable
+     *         (invalid page, edgeless/tile source, or degenerate page height).
+     *
+     * Uses the same per-source rect conversion as renderSearchMatchesOverlay
+     * (PdfText scaled by PDF_TO_PAGE_SCALE; OcrText/TextBoxObj already page
+     * coords). Reused by the scroll-bar search markers (SBS3).
+     */
+    qreal searchMatchPageYFraction(const PdfSearchMatch& match) const;
+
+    /**
+     * @brief Whether a page-local Y position is currently visible (SBS1).
+     * @param pageIndex Target page.
+     * @param normY Page-local Y fraction [0..1].
+     * @return True if the corresponding document Y sits within the viewport
+     *         (with a small margin). Vertical only.
+     */
+    bool isPagePositionVisible(int pageIndex, qreal normY) const;
     
     /**
      * @brief Navigate to a specific position on a page identified by UUID.

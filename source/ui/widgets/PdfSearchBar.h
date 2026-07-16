@@ -87,6 +87,16 @@ signals:
      * @brief Emitted when the search bar is closed.
      */
     void closed();
+
+    /**
+     * @brief Emitted when the query text or match options change (SBS2).
+     * @param text Current search text.
+     *
+     * Drives the debounced whole-document scan / live match count. Distinct
+     * from searchNextRequested/searchPrevRequested, which stay the explicit
+     * jump interaction.
+     */
+    void searchTextChanged(const QString& text);
     
 protected:
     void keyPressEvent(QKeyEvent *event) override;
