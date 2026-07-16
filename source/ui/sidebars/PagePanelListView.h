@@ -34,13 +34,6 @@ public:
      * Used to determine if click was within thumbnail region.
      */
     QPoint lastPressPosition() const { return m_pressPos; }
-    
-    /**
-     * @brief Whether the last press that produced a click came from touch input.
-     * Used by PagePanel to decide whether to toggle selection on a tap in
-     * select mode (touch), versus deferring to native ExtendedSelection (mouse).
-     */
-    bool wasLastPressTouch() const { return m_isTouchInput; }
 
     /**
      * @brief Enable/disable multi-select mode (Plan D2).
@@ -84,6 +77,17 @@ private slots:
 private:
     void startKineticScroll(qreal velocity);
     void stopKineticScroll();
+
+    /**
+     * @brief Whether a press at @p pos landed on the multi-select tick badge
+     *        of @p index. The hit area is padded slightly for pen/touch.
+     */
+    bool pressOnSelectBadge(const QModelIndex& index, const QPoint& pos) const;
+
+    /**
+     * @brief Additively toggle the row of @p index in the selection model.
+     */
+    void toggleRowSelection(const QModelIndex& index);
     
     QTimer m_longPressTimer;
     QPoint m_pressPos;              // Position where press started

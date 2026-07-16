@@ -176,9 +176,22 @@ QRect PageThumbnailDelegate::thumbnailRect(const QRect& itemRect, qreal aspectRa
     return QRect(thumbX, thumbY, m_thumbnailWidth, thumbHeight);
 }
 
+QRect PageThumbnailDelegate::selectBadgeRect(const QRect& itemRect, qreal aspectRatio) const
+{
+    return badgeRectFromThumb(thumbnailRect(itemRect, aspectRatio));
+}
+
 // ============================================================================
 // Private Helpers
 // ============================================================================
+
+QRect PageThumbnailDelegate::badgeRectFromThumb(const QRect& thumbRect) const
+{
+    // Circular badge anchored at the top-left corner of the thumbnail.
+    return QRect(thumbRect.left() + SELECT_BADGE_MARGIN,
+                 thumbRect.top() + SELECT_BADGE_MARGIN,
+                 SELECT_BADGE_SIZE, SELECT_BADGE_SIZE);
+}
 
 void PageThumbnailDelegate::drawPlaceholder(QPainter* painter, const QRect& thumbRect,
                                              bool isPdfPage) const
@@ -234,10 +247,8 @@ void PageThumbnailDelegate::drawSelectBadge(QPainter* painter, const QRect& thum
 {
     // Circular badge in the top-left corner of the thumbnail: a hollow ring
     // when unselected, a filled accent circle with a check when selected.
-    const int badgeSize = 20;
-    const int margin = 6;
-    const QRect badgeRect(thumbRect.left() + margin, thumbRect.top() + margin,
-                          badgeSize, badgeSize);
+    const QRect badgeRect = badgeRectFromThumb(thumbRect);
+    const int badgeSize = badgeRect.width();
 
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, true);

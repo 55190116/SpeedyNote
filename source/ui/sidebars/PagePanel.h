@@ -128,9 +128,10 @@ public:
      * @brief Enable or disable multi-page selection mode.
      * @param enabled True to enter select mode.
      *
-     * In select mode the list uses ExtendedSelection, reorder drag is disabled,
-     * and the in-panel selection header is shown. Toggling always clears the
-     * current selection.
+     * In select mode the list uses NoSelection (selection is driven entirely by
+     * tick-badge taps / Range / Clear so it works without a keyboard), reorder
+     * drag is disabled, and the in-panel selection header is shown. Toggling
+     * always clears the current selection.
      */
     void setSelectMode(bool enabled);
 

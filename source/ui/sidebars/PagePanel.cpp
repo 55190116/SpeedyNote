@@ -392,7 +392,11 @@ void PagePanel::setSelectMode(bool enabled)
     if (enabled) {
         // Multi-select; the list becomes a drag SOURCE only (Plan D2 custom
         // multi-page transfer drag), and does not accept reorder drops.
-        m_listView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        // NoSelection means native input never mutates the selection: it is
+        // driven entirely by tick-badge taps / Range / Clear (tablet-friendly,
+        // no Ctrl/Shift needed). Programmatic selection still renders and a
+        // drag from an already-selected page still starts (DraggingState).
+        m_listView->setSelectionMode(QAbstractItemView::NoSelection);
         m_listView->setDragDropMode(QAbstractItemView::DragOnly);
         m_listView->setDragEnabled(true);
         m_listView->setAcceptDrops(false);
@@ -595,15 +599,10 @@ void PagePanel::onItemClicked(const QModelIndex& index)
         return;
     }
     
-    // Select mode: clicks manage the selection, they do not navigate.
-    // Mouse/stylus selection is handled natively by ExtendedSelection; touch
-    // taps (which the list view turns into clicked() rather than a native
-    // selection) are toggled here so touch users can build a selection.
+    // Select mode: selection is driven entirely by tick-badge taps handled in
+    // PagePanelListView (pen/mouse at press time, touch at release). Clicks here
+    // do not navigate and do not change the selection.
     if (m_selectMode) {
-        if (m_listView->wasLastPressTouch() && m_listView->selectionModel()) {
-            m_listView->selectionModel()->select(
-                index, QItemSelectionModel::Toggle | QItemSelectionModel::Rows);
-        }
         return;
     }
     
