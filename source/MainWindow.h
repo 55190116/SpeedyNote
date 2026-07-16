@@ -56,7 +56,11 @@ class PdfSearchBar;
 class PdfSearchEngine;
 struct PdfSearchMatch;
 struct PdfSearchState;
-struct PdfOutlineItem;
+// PdfOutlineItem must be a COMPLETE type here (not just forward-declared): a
+// private slot takes const QVector<PdfOutlineItem>&, and stricter moc/QMetaType
+// toolchains (Qt on Linux / GCC 15 / Flatpak) require the full definition to
+// build QMetaType<QList<PdfOutlineItem>>. PdfProvider.h is lightweight.
+#include "pdf/PdfProvider.h"
 
 // OCR
 class OcrWorker;
