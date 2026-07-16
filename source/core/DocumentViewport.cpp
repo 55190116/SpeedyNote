@@ -2669,7 +2669,7 @@ void DocumentViewport::dragMoveEvent(QDragMoveEvent* event)
         return;
     }
     QLineF line;
-    m_dropInsertIndex = dropInsertIndexAt(event->position(), line);
+    m_dropInsertIndex = dropInsertIndexAt(SN_DRAG_POS(event), line);
     m_dropIndicatorLine = line;
     m_dropIndicatorActive = true;
     event->setDropAction(Qt::CopyAction);

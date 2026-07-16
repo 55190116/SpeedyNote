@@ -10,15 +10,14 @@
 #include "../core/Document.h"
 #include "../core/DarkModeUtils.h"
 #include "../pdf/PdfSearchEngine.h"  // SBS3: PdfSearchMatch for search-tick placement
+#include "../compat/qt_compat.h"     // Qt5/Qt6 input-device + position shims
 
 #include <QStackedWidget>
 #include <QMouseEvent>
 #include <QTabletEvent>
-#include <QPointingDevice>
 #include <QApplication>
 #include <QTimer>
 #include <QSettings>
-#include <QInputDevice>
 #include <QHash>
 
 // ============================================================================
@@ -566,6 +565,7 @@ bool SplitViewManager::defaultScrollBarsPinned()
 {
     // Default to pinned (always visible) when a physical keyboard is present,
     // matching the pre-SB1 keyboard-keyed visibility behavior.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     const auto devices = QInputDevice::devices();
     for (const QInputDevice* device : devices) {
         if (device && device->type() == QInputDevice::DeviceType::Keyboard) {
@@ -573,6 +573,10 @@ bool SplitViewManager::defaultScrollBarsPinned()
         }
     }
     return false;
+#else
+    // Qt5 has no QInputDevice enumeration; default to pinned (desktop-friendly).
+    return true;
+#endif
 }
 
 QStackedWidget* SplitViewManager::stackForPane(Pane pane) const
@@ -1048,13 +1052,13 @@ void SplitViewManager::proximityFloatCheck(QEvent* event)
     // the float. Touch-synthesized mouse moves are ignored.
     QPointF globalPos;
     if (event->type() == QEvent::TabletMove) {
-        globalPos = static_cast<QTabletEvent*>(event)->globalPosition();
+        globalPos = SN_TABLET_GLOBAL_POSF(static_cast<QTabletEvent*>(event));
     } else {
         QMouseEvent* me = static_cast<QMouseEvent*>(event);
-        if (me->pointerType() == QPointingDevice::PointerType::Finger) {
+        if (SN_MOUSE_IS_FINGER(me)) {
             return;
         }
-        globalPos = me->globalPosition();
+        globalPos = SN_MOUSE_GLOBAL_POSF(me);
     }
 
     checkPaneProximity(Left, globalPos);

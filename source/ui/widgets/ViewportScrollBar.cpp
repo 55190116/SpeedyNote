@@ -5,6 +5,7 @@
 #include "ViewportScrollBar.h"
 
 #include "../../core/DarkModeUtils.h"
+#include "../../compat/qt_compat.h"  // Qt5/Qt6 mouse position shims
 
 #include <QPainter>
 #include <QMouseEvent>
@@ -381,7 +382,7 @@ void ViewportScrollBar::mousePressEvent(QMouseEvent* event)
         return;
     }
 
-    const qreal pos = posAlongAxis(event->position());
+    const qreal pos = posAlongAxis(SN_MOUSE_POS(event));
     const qreal start = handleStartPx();
     const qreal len = handleLengthPx();
 
@@ -412,7 +413,7 @@ void ViewportScrollBar::mousePressEvent(QMouseEvent* event)
 
 void ViewportScrollBar::mouseMoveEvent(QMouseEvent* event)
 {
-    const qreal pos = posAlongAxis(event->position());
+    const qreal pos = posAlongAxis(SN_MOUSE_POS(event));
 
     if (m_dragging) {
         const qreal track = trackLength();
@@ -452,7 +453,7 @@ void ViewportScrollBar::mouseMoveEvent(QMouseEvent* event)
             tip = m_markers[mi].tooltip;
         }
         if (idx >= 0 && !tip.isEmpty()) {
-            QToolTip::showText(event->globalPosition().toPoint(), tip, this);
+            QToolTip::showText(SN_MOUSE_GLOBAL_POS(event), tip, this);
         } else {
             QToolTip::hideText();
         }
