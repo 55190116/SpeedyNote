@@ -1,5 +1,6 @@
 #include "PagePanelListView.h"
 #include "../PageThumbnailModel.h"
+#include "../PageThumbnailDelegate.h"
 
 #include <QMouseEvent>
 #include <QDragMoveEvent>
@@ -7,6 +8,7 @@
 #include <QDrag>
 #include <QMimeData>
 #include <QPainter>
+#include <QItemSelectionModel>
 #include <QDebug>
 
 // ============================================================================
@@ -129,6 +131,15 @@ void PagePanelListView::mousePressEvent(QMouseEvent* event)
                  << "isTouch: false (mouse/stylus)"
                  << "scrollPos:" << verticalScrollBar()->value();
 #endif
+
+        // In select mode, a tap on the tick badge additively toggles that
+        // page. Intercept it before the base class so native selection never
+        // wipes the multi-selection (there is no Ctrl/Shift on a tablet).
+        if (m_selectMode && pressOnSelectBadge(m_pressedIndex, event->pos())) {
+            toggleRowSelection(m_pressedIndex);
+            event->accept();
+            return;
+        }
     }
     
     // Mouse/stylus: let QListView handle normally
@@ -166,12 +177,20 @@ void PagePanelListView::mouseReleaseEvent(QMouseEvent* event)
             m_isTouchInput = false;
             m_touchScrolling = false;
             
-            // If this was a tap (not a scroll), emit clicked signal manually
+            // If this was a tap (not a scroll), handle it. In select mode a
+            // tap on the tick badge toggles that page (body taps do nothing);
+            // otherwise emit clicked() so PagePanel can navigate.
             if (!wasScrolling) {
                 QModelIndex index = indexAt(event->pos());
                 if (index.isValid() && index == m_pressedIndex) {
-                    // Emit the clicked signal that PagePanel listens to
-                    emit clicked(index);
+                    if (m_selectMode) {
+                        if (pressOnSelectBadge(index, event->pos())) {
+                            toggleRowSelection(index);
+                        }
+                    } else {
+                        // Emit the clicked signal that PagePanel listens to
+                        emit clicked(index);
+                    }
                 }
             } else {
                 // Use the velocity that was calculated during dragging
@@ -365,6 +384,45 @@ void PagePanelListView::startDrag(Qt::DropActions supportedActions)
     
     // Execute drag (Qt deletes QDrag when operation completes)
     drag->exec(supportedActions, Qt::MoveAction);
+}
+
+// ============================================================================
+// Tick Badge Selection (pen/touch multi-select)
+// ============================================================================
+
+bool PagePanelListView::pressOnSelectBadge(const QModelIndex& index, const QPoint& pos) const
+{
+    if (!index.isValid()) {
+        return false;
+    }
+    auto* delegate = qobject_cast<PageThumbnailDelegate*>(itemDelegate());
+    if (!delegate) {
+        return false;
+    }
+
+    const QRect itemRect = visualRect(index);
+    if (itemRect.isEmpty()) {
+        return false;
+    }
+
+    qreal aspectRatio = index.data(PageThumbnailModel::PageAspectRatioRole).toReal();
+    if (aspectRatio <= 0) {
+        aspectRatio = -1;  // Delegate falls back to its default.
+    }
+
+    // Pad the hit area for comfortable pen/finger targeting (visual size unchanged).
+    constexpr int kHitPad = 8;
+    const QRect hitRect = delegate->selectBadgeRect(itemRect, aspectRatio)
+                              .adjusted(-kHitPad, -kHitPad, kHitPad, kHitPad);
+    return hitRect.contains(pos);
+}
+
+void PagePanelListView::toggleRowSelection(const QModelIndex& index)
+{
+    if (!index.isValid() || !selectionModel()) {
+        return;
+    }
+    selectionModel()->select(index, QItemSelectionModel::Toggle | QItemSelectionModel::Rows);
 }
 
 // ============================================================================

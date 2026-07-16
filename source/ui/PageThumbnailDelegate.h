@@ -84,6 +84,17 @@ public:
      */
     QRect thumbnailRect(const QRect& itemRect, qreal aspectRatio = -1) const;
 
+    /**
+     * @brief Calculate the multi-select tick badge rectangle within an item rect.
+     * @param itemRect The full item rectangle.
+     * @param aspectRatio The page aspect ratio (height/width). Use -1 for default.
+     * @return The badge rectangle in the same coordinate system as itemRect.
+     *
+     * Used to hit-test taps on the tick badge so pen/touch users can toggle
+     * page selection without a keyboard.
+     */
+    QRect selectBadgeRect(const QRect& itemRect, qreal aspectRatio = -1) const;
+
 private:
     /**
      * @brief Draw the thumbnail placeholder when image is not available.
@@ -128,6 +139,12 @@ private:
     void drawSelectBadge(QPainter* painter, const QRect& thumbRect,
                          bool isSelected) const;
 
+    /**
+     * @brief Compute the tick badge rect from a thumbnail rect (shared by
+     *        painting and hit-testing so they never drift apart).
+     */
+    QRect badgeRectFromThumb(const QRect& thumbRect) const;
+
     int m_thumbnailWidth = 150;
     bool m_darkMode = false;
     bool m_selectMode = false;
@@ -141,6 +158,8 @@ private:
     static constexpr int BORDER_WIDTH_CURRENT = 3;
     static constexpr int PAGE_NUMBER_HEIGHT = 24;
     static constexpr int ITEM_SPACING = 8;
+    static constexpr int SELECT_BADGE_SIZE = 20;
+    static constexpr int SELECT_BADGE_MARGIN = 6;
 };
 
 #endif // PAGETHUMBNAILDELEGATE_H
