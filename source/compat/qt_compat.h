@@ -48,13 +48,19 @@
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #  define SN_MOUSE_POS(event)    (event)->position()           // QMouseEvent local pos
 #  define SN_MOUSE_GLOBAL_POS(event) (event)->globalPosition().toPoint() // QMouseEvent → QPoint
+#  define SN_MOUSE_GLOBAL_POSF(event) (event)->globalPosition() // QMouseEvent → QPointF
+#  define SN_TABLET_GLOBAL_POSF(event) (event)->globalPosition() // QTabletEvent → QPointF
 #  define SN_EVENT_POS(event)    (event)->position()           // QTabletEvent
 #  define SN_NGE_POS(event)     (event)->position()           // QNativeGestureEvent
+#  define SN_DRAG_POS(event)     (event)->position()           // QDrag(Move/Drop)Event → QPointF
 #else
 #  define SN_MOUSE_POS(event)    (event)->localPos()           // QMouseEvent::localPos() → QPointF
 #  define SN_MOUSE_GLOBAL_POS(event) (event)->globalPos()      // QMouseEvent → QPoint
+#  define SN_MOUSE_GLOBAL_POSF(event) QPointF((event)->globalPos()) // QMouseEvent → QPointF
+#  define SN_TABLET_GLOBAL_POSF(event) QPointF((event)->globalPos()) // QTabletEvent → QPointF
 #  define SN_EVENT_POS(event)    (event)->posF()               // QTabletEvent::posF() → QPointF
 #  define SN_NGE_POS(event)     (event)->localPos()           // QNativeGestureEvent::localPos()
+#  define SN_DRAG_POS(event)     (event)->posF()               // QDropEvent::posF() → QPointF
 #endif
 // QWheelEvent::position() exists since Qt 5.14, so works in both Qt5.15 and Qt6.
 // Use this instead of SN_EVENT_POS for wheel events to avoid the posF() warning.
@@ -72,6 +78,8 @@
 #  define SN_TOUCHPAD_DEVICE_TYPE        QInputDevice::DeviceType::TouchPad
 #  define SN_IS_ERASER_TABLET(event)     ((event)->pointerType() == QPointingDevice::PointerType::Eraser)
 #  define SN_IS_STYLUS_TABLET(event)     ((event)->deviceType()  == QInputDevice::DeviceType::Stylus)
+// QMouseEvent finger detection (palm rejection). Qt6 exposes pointerType().
+#  define SN_MOUSE_IS_FINGER(event)      ((event)->pointerType() == QPointingDevice::PointerType::Finger)
 // Qt6 only: access the QPointingDevice for name-based eraser detection
 #  define SN_HAS_POINTING_DEVICE 1
 #else
@@ -79,6 +87,9 @@
 #  define SN_TOUCHPAD_DEVICE_TYPE        QTouchDevice::TouchPad
 #  define SN_IS_ERASER_TABLET(event)     ((event)->pointerType() == QTabletEvent::Eraser)
 #  define SN_IS_STYLUS_TABLET(event)     ((event)->deviceType() == QTabletEvent::Stylus)
+// Qt5: QMouseEvent has no pointerType(); approximate "finger" as a
+// touch-synthesized mouse event (real pens/mice are NotSynthesized).
+#  define SN_MOUSE_IS_FINGER(event)      ((event)->source() != Qt::MouseEventNotSynthesized)
 // Qt5: QPointingDevice does not exist; name-based detection is unavailable
 #  undef  SN_HAS_POINTING_DEVICE
 #endif
