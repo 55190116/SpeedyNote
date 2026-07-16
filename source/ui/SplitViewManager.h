@@ -15,6 +15,7 @@
 #include <QSplitter>
 #include <QHBoxLayout>
 #include <QVector>
+#include <QHash>
 #include <QPointer>
 
 #include "widgets/ViewportScrollBar.h"  // ViewportScrollBar::DockEdge used in the API
@@ -25,6 +26,7 @@ class Document;
 class DocumentViewport;
 class QStackedWidget;
 class QTimer;
+struct PdfSearchMatch;  // SBS3: search-hit results feed the scroll-bar markers
 
 class SplitViewManager : public QWidget {
     Q_OBJECT
@@ -162,6 +164,27 @@ public:
      */
     void updateScrollBarDocumentMap(DocumentViewport* vp);
 
+    /**
+     * @brief Push SBS2 whole-document search results as amber ticks on the
+     *        page-axis bar bound to @p vp (Plan SBS3).
+     * @param resultsByPage   Per-page match lists from the streaming scan.
+     * @param currentPage     Notebook page of the active Next/Prev match (-1 none).
+     * @param currentMatchIndex Index within that page's matches of the active match.
+     *
+     * No-op for a null/unbound @p vp or an edgeless document. Coexists with the
+     * SB2 link markers (separate channel). Positions come from the viewport's
+     * page layout so they are stable across zoom.
+     */
+    void updateScrollBarSearchMarkers(DocumentViewport* vp,
+                                      const QHash<int, QVector<PdfSearchMatch>>& resultsByPage,
+                                      int currentPage,
+                                      int currentMatchIndex);
+
+    /**
+     * @brief Remove all search-hit ticks from the bar bound to @p vp (Plan SBS3).
+     */
+    void clearScrollBarSearchMarkers(DocumentViewport* vp);
+
 signals:
     void activeViewportChanged(DocumentViewport* viewport);
     void activePaneChanged(Pane pane);
@@ -176,6 +199,12 @@ signals:
      * notebook is open.
      */
     void totalTabCountChanged(int total);
+
+    /**
+     * @brief Forwarded from a bar's search-tick click (Plan SBS3), tagged with
+     *        the bound viewport so MainWindow can reveal + select the match.
+     */
+    void searchMarkerActivated(DocumentViewport* vp, int pageIndex, qreal normY, int matchIndex);
 
 private slots:
     void onLeftViewportChanged(DocumentViewport* vp);
@@ -204,6 +233,7 @@ private:
         QMetaObject::Connection cVToView;
         QMetaObject::Connection cHToView;
         QMetaObject::Connection cMarker;   // SB2: vBar markerActivated -> scrollToPage
+        QMetaObject::Connection cSearchMarker;  // SBS3: vBar searchMarkerActivated -> forward
     };
 
     QStackedWidget* stackForPane(Pane pane) const;

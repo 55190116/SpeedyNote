@@ -4,6 +4,8 @@
 
 #include "ViewportScrollBar.h"
 
+#include "../../core/DarkModeUtils.h"
+
 #include <QPainter>
 #include <QMouseEvent>
 #include <QToolTip>
@@ -82,6 +84,34 @@ void ViewportScrollBar::setMarkers(const QVector<BarMarker>& markers)
     update();
 }
 
+void ViewportScrollBar::setSearchMarkers(const QVector<BarMarker>& markers)
+{
+    if (!isVertical()) {
+        if (!m_searchMarkers.isEmpty()) { clearSearchMarkers(); }
+        return;
+    }
+    m_searchMarkers = markers;
+    // Sort by track position so the pixel-merge pass can coalesce neighbours
+    // in a single linear walk.
+    std::sort(m_searchMarkers.begin(), m_searchMarkers.end(),
+              [](const BarMarker& a, const BarMarker& b) { return a.pos < b.pos; });
+    m_searchMergedTrackLen = -1.0;  // invalidate the merge cache
+    update();
+}
+
+void ViewportScrollBar::clearSearchMarkers()
+{
+    if (m_searchMarkers.isEmpty() && m_searchMerged.isEmpty()) return;
+    m_searchMarkers.clear();
+    m_searchMerged.clear();
+    m_searchMergedTrackLen = -1.0;
+    if (m_hoveredMarkerIsSearch) {
+        m_hoveredMarker = -1;
+        m_hoveredMarkerIsSearch = false;
+    }
+    update();
+}
+
 // ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
@@ -136,6 +166,66 @@ int ViewportScrollBar::markerAtPos(qreal pos) const
     qreal bestDist = kMarkerHitBandPx;
     for (int i = 0; i < m_markers.size(); ++i) {
         const qreal mp = fractionToPx(m_markers[i].pos);
+        const qreal d = qAbs(pos - mp);
+        if (d <= bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+const QVector<ViewportScrollBar::BarMarker>& ViewportScrollBar::mergedSearchMarkers() const
+{
+    const qreal track = trackLength();
+    // Rebuild only when the raw set changed (cache invalidated to -1) or the
+    // track length changed (px spacing shifts on resize).
+    if (m_searchMergedTrackLen == track) {
+        return m_searchMerged;
+    }
+    m_searchMerged.clear();
+    m_searchMergedTrackLen = track;
+    if (m_searchMarkers.isEmpty()) {
+        return m_searchMerged;
+    }
+
+    // m_searchMarkers is pre-sorted by pos; coalesce runs whose pixel positions
+    // fall within kSearchMergeBandPx of the band's first tick.
+    int i = 0;
+    while (i < m_searchMarkers.size()) {
+        const qreal bandStartPx = fractionToPx(m_searchMarkers[i].pos);
+        BarMarker band = m_searchMarkers[i];
+        int count = m_searchMarkers[i].matchCount;
+        bool anyCurrent = m_searchMarkers[i].current;
+        // The representative (jump target) is the current match if present in
+        // the band, else the first tick (already in `band`).
+        int j = i + 1;
+        for (; j < m_searchMarkers.size(); ++j) {
+            if (fractionToPx(m_searchMarkers[j].pos) - bandStartPx > kSearchMergeBandPx) {
+                break;
+            }
+            count += m_searchMarkers[j].matchCount;
+            if (m_searchMarkers[j].current) {
+                anyCurrent = true;
+                band = m_searchMarkers[j];  // prefer the current match as target
+            }
+        }
+        band.matchCount = count;
+        band.current = anyCurrent;
+        band.tooltip = tr("%n match(es)", "", count);
+        m_searchMerged.push_back(band);
+        i = j;
+    }
+    return m_searchMerged;
+}
+
+int ViewportScrollBar::searchMarkerAtPos(qreal pos) const
+{
+    const QVector<BarMarker>& merged = mergedSearchMarkers();
+    int best = -1;
+    qreal bestDist = kMarkerHitBandPx;
+    for (int i = 0; i < merged.size(); ++i) {
+        const qreal mp = fractionToPx(merged[i].pos);
         const qreal d = qAbs(pos - mp);
         if (d <= bestDist) {
             bestDist = d;
@@ -257,6 +347,23 @@ void ViewportScrollBar::paintEvent(QPaintEvent* /*event*/)
             p.drawRoundedRect(QRectF(tickX, y, tickW, tickH), 1.0, 1.0);
         }
     }
+
+    // SBS3: search-hit ticks (amber), merged by pixel proximity, above the link
+    // ticks. The current Next/Prev match is emphasized (brighter + taller).
+    if (isVertical() && !m_searchMarkers.isEmpty()) {
+        const QColor amber = DarkModeUtils::searchHitColor(m_darkMode);
+        QColor currentAmber = amber.lighter(m_darkMode ? 115 : 135);
+        currentAmber.setAlpha(255);
+        const qreal tickInset = 1.5;
+        const qreal tickX = tickInset;
+        const qreal tickW = qMax(0.0, width() - 2.0 * tickInset);
+        for (const BarMarker& m : mergedSearchMarkers()) {
+            const qreal tickH = m.current ? 5.0 : 3.0;
+            const qreal y = fractionToPx(m.pos) - tickH / 2.0;
+            p.setBrush(m.current ? currentAmber : amber);
+            p.drawRoundedRect(QRectF(tickX, y, tickW, tickH), 1.0, 1.0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +386,13 @@ void ViewportScrollBar::mousePressEvent(QMouseEvent* event)
         m_dragging = true;
         m_dragGrabOffset = pos - start;
         update();
+    } else if (const int si = searchMarkerAtPos(pos); si >= 0) {
+        // SBS3: search ticks take priority over link ticks during an active
+        // search. Reveal + select the (representative) match.
+        const BarMarker& m = mergedSearchMarkers()[si];
+        if (m.pageIndex >= 0) {
+            emit searchMarkerActivated(m.pageIndex, m.normY, m.matchIndex);
+        }
     } else if (const int mi = markerAtPos(pos); mi >= 0) {
         // SB2: click a marker tick to jump to its page.
         const int page = m_markers[mi].pageIndex;
@@ -317,14 +431,24 @@ void ViewportScrollBar::mouseMoveEvent(QMouseEvent* event)
         update();
     }
 
-    // SB2: marker tooltip (only when not over the handle). Debounced on the
-    // hovered-marker index so we don't re-fire QToolTip on every move.
-    const int mi = hovered ? -1 : markerAtPos(pos);
-    if (mi != m_hoveredMarker) {
-        m_hoveredMarker = mi;
-        if (mi >= 0 && !m_markers[mi].tooltip.isEmpty()) {
-            QToolTip::showText(event->globalPosition().toPoint(),
-                               m_markers[mi].tooltip, this);
+    // SB2/SBS3: marker tooltip (only when not over the handle). Search ticks
+    // resolve first, then link ticks. Debounced on the (channel, index) pair so
+    // we don't re-fire QToolTip on every move.
+    int si = hovered ? -1 : searchMarkerAtPos(pos);
+    int mi = (hovered || si >= 0) ? -1 : markerAtPos(pos);
+    const bool isSearch = (si >= 0);
+    const int idx = isSearch ? si : mi;
+    if (idx != m_hoveredMarker || isSearch != m_hoveredMarkerIsSearch) {
+        m_hoveredMarker = idx;
+        m_hoveredMarkerIsSearch = isSearch;
+        QString tip;
+        if (isSearch) {
+            tip = mergedSearchMarkers()[si].tooltip;
+        } else if (mi >= 0) {
+            tip = m_markers[mi].tooltip;
+        }
+        if (idx >= 0 && !tip.isEmpty()) {
+            QToolTip::showText(event->globalPosition().toPoint(), tip, this);
         } else {
             QToolTip::hideText();
         }
@@ -350,5 +474,6 @@ void ViewportScrollBar::leaveEvent(QEvent* event)
         update();
     }
     m_hoveredMarker = -1;
+    m_hoveredMarkerIsSearch = false;
     QWidget::leaveEvent(event);
 }

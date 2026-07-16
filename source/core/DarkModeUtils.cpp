@@ -221,4 +221,12 @@ QColor sourceAccentColor(int slot, bool darkMode)
     return palette[slot % kCount];
 }
 
+QColor searchHitColor(bool darkMode)
+{
+    // A single fixed amber for every search tick (SBS3), distinct enough from
+    // the per-source accent palette to read as "search". The bar derives a
+    // brighter variant for the current match.
+    return darkMode ? QColor(255, 176, 64) : QColor(226, 135, 10);
+}
+
 } // namespace DarkModeUtils

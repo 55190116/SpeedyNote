@@ -44,12 +44,19 @@ public:
     };
 
     // A single tick at a track fraction. pageIndex is the jump target.
+    // For SearchHit ticks (SBS3), normY/matchIndex locate the exact match within
+    // the page and matchCount/current drive merge-tooltips and emphasis; Link
+    // ticks leave those at their defaults (normY = -1 => page top).
     struct BarMarker {
         qreal pos = 0.0;
         QColor color;
         int pageIndex = -1;
         MarkerKind kind = MarkerKind::Link;
         QString tooltip;
+        qreal normY = -1.0;    // SBS3: page-local Y fraction of the match (-1 = page top)
+        int matchIndex = -1;   // SBS3: index within the page's match list
+        int matchCount = 1;    // SBS3: matches merged into this tick
+        bool current = false;  // SBS3: the active Next/Prev match
     };
 
     explicit ViewportScrollBar(Qt::Orientation orientation,
@@ -76,6 +83,13 @@ public:
     void setAccentRegions(const QVector<AccentRegion>& regions);
     void setMarkers(const QVector<BarMarker>& markers);
 
+    // SBS3: search-hit ticks live in a separate channel so they coexist with
+    // (never replace) the SB2 link markers. Positions are track fractions; the
+    // bar merges them by pixel proximity at paint/hit-test time. No-op on
+    // horizontal bars.
+    void setSearchMarkers(const QVector<BarMarker>& markers);
+    void clearSearchMarkers();
+
 public slots:
     // Programmatic position update (from the viewport). Does NOT emit
     // fractionChanged, so it cannot feed back into the viewport.
@@ -90,6 +104,10 @@ signals:
     // Emitted when the user clicks a marker tick (SB2). pageIndex is the
     // marker's jump target.
     void markerActivated(int pageIndex);
+    // Emitted when the user clicks a search-hit tick (SBS3). Carries the
+    // page + intra-page position + match index so the controller can reveal
+    // and select that exact match.
+    void searchMarkerActivated(int pageIndex, qreal normY, int matchIndex);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -112,6 +130,10 @@ private:
     int markerAtPos(qreal pos) const;       // index into m_markers within hit band, or -1
     QColor legibleMarkerColor(const QColor& raw) const;
 
+    // SBS3 helpers.
+    const QVector<BarMarker>& mergedSearchMarkers() const;  // pixel-merged, cached by track length
+    int searchMarkerAtPos(qreal pos) const; // index into mergedSearchMarkers(), or -1
+
     QColor trackColor() const;
     QColor handleColor() const;
 
@@ -125,13 +147,19 @@ private:
     bool m_dragging = false;
     bool m_handleHovered = false;
     qreal m_dragGrabOffset = 0.0;  // px between grab point and handle start
-    int m_hoveredMarker = -1;      // SB2: marker index under cursor (tooltip debounce)
+    int m_hoveredMarker = -1;      // SB2/SBS3: marker index under cursor (tooltip debounce)
+    bool m_hoveredMarkerIsSearch = false;  // SBS3: which channel m_hoveredMarker indexes
 
     QVector<AccentRegion> m_accents;  // SB2: per-source color bands
-    QVector<BarMarker> m_markers;     // SB2: link/search ticks
+    QVector<BarMarker> m_markers;     // SB2: link ticks
+
+    QVector<BarMarker> m_searchMarkers;  // SBS3: raw search ticks (sorted by pos)
+    mutable QVector<BarMarker> m_searchMerged;      // SBS3: pixel-merged cache
+    mutable qreal m_searchMergedTrackLen = -1.0;    // SBS3: track length the cache was built for
 
     static constexpr int kMinHandlePx = 40;
     static constexpr qreal kMarkerHitBandPx = 6.0;  // half-width of tick hit zone
+    static constexpr qreal kSearchMergeBandPx = 4.0;  // SBS3: merge ticks within this px
 };
 
 #endif // VIEWPORTSCROLLBAR_H

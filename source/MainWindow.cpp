@@ -6014,6 +6014,11 @@ void MainWindow::setupPdfSearch()
         m_searchEngine->setDocument(doc);
         m_searchResultsByPage.clear();
         m_searchTotalMatches = 0;
+        // SBS3: clear stale ticks; the new scan refills them as it streams.
+        if (m_searchMarkerRefresh) m_searchMarkerRefresh->stop();
+        if (m_splitViewManager) {
+            m_splitViewManager->clearScrollBarSearchMarkers(vp);
+        }
         m_searchEngine->scanAllPages(m_pdfSearchBar->searchText(),
                                      m_pdfSearchBar->caseSensitive(),
                                      m_pdfSearchBar->wholeWord());
@@ -6025,6 +6030,17 @@ void MainWindow::setupPdfSearch()
             &MainWindow::onSearchScanPage);
     connect(m_searchEngine, &PdfSearchEngine::scanComplete, this,
             &MainWindow::onSearchScanComplete);
+
+    // SBS3: coalesce scroll-bar marker refreshes so streaming pageScanned
+    // events don't rebuild the full marker set on every page.
+    m_searchMarkerRefresh = new QTimer(this);
+    m_searchMarkerRefresh->setSingleShot(true);
+    m_searchMarkerRefresh->setInterval(200);
+    connect(m_searchMarkerRefresh, &QTimer::timeout, this, &MainWindow::refreshSearchMarkers);
+    if (m_splitViewManager) {
+        connect(m_splitViewManager, &SplitViewManager::searchMarkerActivated,
+                this, &MainWindow::onSearchMarkerActivated);
+    }
     
     // Position at bottom of viewport
     updatePdfSearchBarPosition();
@@ -6104,6 +6120,13 @@ void MainWindow::hidePdfSearchBar()
     }
     m_searchResultsByPage.clear();
     m_searchTotalMatches = 0;
+    // SBS3: clear the scroll-bar search ticks.
+    if (m_searchMarkerRefresh) {
+        m_searchMarkerRefresh->stop();
+    }
+    if (m_splitViewManager) {
+        m_splitViewManager->clearScrollBarSearchMarkers(currentViewport());
+    }
     
     m_pdfSearchBar->hide();
     m_pdfSearchBar->clearStatus();
@@ -6310,6 +6333,8 @@ void MainWindow::onSearchMatchFound(const PdfSearchMatch& match,
     
     // SBS2: keep the whole-document match count visible while navigating.
     updateSearchCountStatus();
+    // SBS3: re-emphasize the current match's tick as Next/Prev moves it.
+    refreshSearchMarkers();
     
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "[MainWindow] Search match found: source=" << static_cast<int>(match.source)
@@ -6360,6 +6385,11 @@ void MainWindow::onSearchTextChanged(const QString& text)
         m_searchResultsByPage.clear();
         m_searchTotalMatches = 0;
         m_pdfSearchBar->clearStatus();
+        // SBS3: drop the scroll-bar ticks along with the aggregate.
+        if (m_searchMarkerRefresh) m_searchMarkerRefresh->stop();
+        if (m_splitViewManager) {
+            m_splitViewManager->clearScrollBarSearchMarkers(currentViewport());
+        }
         return;
     }
 
@@ -6380,11 +6410,59 @@ void MainWindow::onSearchScanPage(int pageIndex, const QVector<PdfSearchMatch>& 
     m_searchResultsByPage.insert(pageIndex, matches);
     m_searchTotalMatches += matches.size();
     updateSearchCountStatus();
+    // SBS3: stream ticks in, coalesced so we don't rebuild on every page.
+    if (m_searchMarkerRefresh) m_searchMarkerRefresh->start();
 }
 
 void MainWindow::onSearchScanComplete(int totalMatches)
 {
     m_searchTotalMatches = totalMatches;
+    updateSearchCountStatus();
+    // SBS3: final, authoritative marker rebuild.
+    if (m_searchMarkerRefresh) m_searchMarkerRefresh->stop();
+    refreshSearchMarkers();
+}
+
+void MainWindow::refreshSearchMarkers()
+{
+    if (!m_splitViewManager || !m_pdfSearchBar || !m_pdfSearchBar->isVisible()) {
+        return;
+    }
+    DocumentViewport* vp = currentViewport();
+    if (!vp) return;
+    const int curPage = m_searchState ? m_searchState->currentPageIndex : -1;
+    const int curMatch = m_searchState ? m_searchState->currentMatchIndex : -1;
+    m_splitViewManager->updateScrollBarSearchMarkers(vp, m_searchResultsByPage,
+                                                     curPage, curMatch);
+}
+
+void MainWindow::onSearchMarkerActivated(DocumentViewport* vp, int pageIndex,
+                                         qreal normY, int matchIndex)
+{
+    if (!vp || vp != currentViewport() || !m_searchState) {
+        return;
+    }
+
+    // Adopt the clicked match as the current one so Next/Prev continue from it.
+    const QVector<PdfSearchMatch> pageMatches = m_searchResultsByPage.value(pageIndex);
+    int idxWithinPage = -1;
+    for (int i = 0; i < pageMatches.size(); ++i) {
+        if (pageMatches[i].matchIndex == matchIndex) { idxWithinPage = i; break; }
+    }
+
+    m_searchState->currentPageIndex = pageIndex;
+    m_searchState->currentMatchIndex = matchIndex;
+    m_searchState->currentPageMatches = pageMatches;
+
+    // Reveal the exact match (SBS1 path), falling back to the page top.
+    if (normY < 0.0) {
+        vp->scrollToPage(pageIndex);
+    } else {
+        vp->scrollToPositionOnPage(pageIndex, QPointF(-1.0, normY));
+    }
+    vp->setSearchMatches(pageMatches, idxWithinPage, pageIndex);
+
+    refreshSearchMarkers();      // re-emphasize the now-current tick
     updateSearchCountStatus();
 }
 

@@ -9,6 +9,7 @@
 #include "../core/DocumentViewport.h"
 #include "../core/Document.h"
 #include "../core/DarkModeUtils.h"
+#include "../pdf/PdfSearchEngine.h"  // SBS3: PdfSearchMatch for search-tick placement
 
 #include <QStackedWidget>
 #include <QMouseEvent>
@@ -676,7 +677,9 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     disconnect(b.cVToView);
     disconnect(b.cHToView);
     disconnect(b.cMarker);
-    b.cViewToV = b.cViewToH = b.cVToView = b.cHToView = b.cMarker = QMetaObject::Connection{};
+    disconnect(b.cSearchMarker);
+    b.cViewToV = b.cViewToH = b.cVToView = b.cHToView = b.cMarker
+              = b.cSearchMarker = QMetaObject::Connection{};
 
     b.bound = vp;
     if (!vp) return;
@@ -731,6 +734,14 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
                         [this, pane](int pageIndex) {
         PaneBars& pb = m_paneBars[static_cast<int>(pane)];
         if (pb.bound && pageIndex >= 0) pb.bound->scrollToPage(pageIndex);
+    });
+
+    // SBS3: forward a search-tick click up to MainWindow (tagged with the vp)
+    // so it can reveal + select the exact match and keep Next/Prev in sync.
+    b.cSearchMarker = connect(b.vBar, &ViewportScrollBar::searchMarkerActivated, this,
+                              [this, pane](int pageIndex, qreal normY, int matchIndex) {
+        PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+        if (pb.bound) emit searchMarkerActivated(pb.bound, pageIndex, normY, matchIndex);
     });
 
     // SB2: compute the per-source accent + link-marker document map now.
@@ -819,6 +830,95 @@ void SplitViewManager::updateScrollBarDocumentMap(DocumentViewport* vp)
         markers.push_back(std::move(m));
     }
     b.vBar->setMarkers(markers);
+}
+
+void SplitViewManager::updateScrollBarSearchMarkers(
+    DocumentViewport* vp,
+    const QHash<int, QVector<PdfSearchMatch>>& resultsByPage,
+    int currentPage,
+    int currentMatchIndex)
+{
+    if (!vp) return;
+
+    int paneIdx = -1;
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].bound == vp) { paneIdx = i; break; }
+    }
+    if (paneIdx < 0) return;
+
+    PaneBars& b = m_paneBars[paneIdx];
+    if (!b.vBar) return;
+
+    Document* doc = vp->document();
+    if (!doc || doc->isEdgeless() || resultsByPage.isEmpty()) {
+        b.vBar->clearSearchMarkers();
+        return;
+    }
+
+    // A global cap keeps huge result sets cheap to build/paint. Beyond it we
+    // coarsen to one tick per page (page-top) that still counts all matches.
+    static constexpr int kSearchMarkerCap = 2000;
+    int totalMatches = 0;
+    for (auto it = resultsByPage.constBegin(); it != resultsByPage.constEnd(); ++it) {
+        totalMatches += it.value().size();
+    }
+    const bool coarsen = totalMatches > kSearchMarkerCap;
+
+    QVector<ViewportScrollBar::BarMarker> raw;
+    raw.reserve(coarsen ? resultsByPage.size() : totalMatches);
+
+    for (auto it = resultsByPage.constBegin(); it != resultsByPage.constEnd(); ++it) {
+        const int page = it.key();
+        const QVector<PdfSearchMatch>& matches = it.value();
+        if (matches.isEmpty()) continue;
+
+        const qreal f0 = vp->pageTrackFraction(page);
+        if (f0 < 0.0) continue;  // unmappable (e.g. layout not ready)
+        const qreal f1 = vp->pageTrackFraction(page + 1);
+        const qreal span = (f1 > f0) ? (f1 - f0) : 0.0;
+
+        if (coarsen) {
+            // One page-level tick summarizing the whole page.
+            const PdfSearchMatch& first = matches.first();
+            ViewportScrollBar::BarMarker m;
+            m.pos = f0;
+            m.kind = ViewportScrollBar::MarkerKind::SearchHit;
+            m.pageIndex = page;
+            m.matchIndex = first.matchIndex;
+            m.normY = 0.0;
+            m.matchCount = matches.size();
+            m.current = (page == currentPage);
+            raw.push_back(std::move(m));
+            continue;
+        }
+
+        for (const PdfSearchMatch& match : matches) {
+            const qreal normY = vp->searchMatchPageYFraction(match);
+            if (normY < 0.0) continue;  // tile/edgeless source: no page-axis pos
+            ViewportScrollBar::BarMarker m;
+            m.pos = f0 + normY * span;
+            m.kind = ViewportScrollBar::MarkerKind::SearchHit;
+            m.pageIndex = page;
+            m.matchIndex = match.matchIndex;
+            m.normY = normY;
+            m.matchCount = 1;
+            m.current = (page == currentPage && match.matchIndex == currentMatchIndex);
+            raw.push_back(std::move(m));
+        }
+    }
+
+    b.vBar->setSearchMarkers(raw);
+}
+
+void SplitViewManager::clearScrollBarSearchMarkers(DocumentViewport* vp)
+{
+    if (!vp) return;
+    for (int i = 0; i < 2; ++i) {
+        if (m_paneBars[i].bound == vp && m_paneBars[i].vBar) {
+            m_paneBars[i].vBar->clearSearchMarkers();
+            return;
+        }
+    }
 }
 
 void SplitViewManager::refreshHandleSizes(Pane pane)

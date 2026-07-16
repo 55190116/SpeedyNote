@@ -661,6 +661,8 @@ private:
     QTimer *m_searchScanDebounce = nullptr;
     QHash<int, QVector<PdfSearchMatch>> m_searchResultsByPage;
     int m_searchTotalMatches = 0;
+    // SBS3: coalesces scroll-bar search-marker refreshes during streaming
+    QTimer *m_searchMarkerRefresh = nullptr;
     
     // OCR
     QThread *m_ocrThread = nullptr;
@@ -843,6 +845,9 @@ private:
     void onSearchScanPage(int pageIndex, const QVector<PdfSearchMatch>& matches);
     void onSearchScanComplete(int totalMatches);
     void updateSearchCountStatus();    // Reflect m_searchTotalMatches in the bar
+    // SBS3: scroll-bar search-hit ticks
+    void refreshSearchMarkers();       // Push current aggregate to the active bar
+    void onSearchMarkerActivated(DocumentViewport* vp, int pageIndex, qreal normY, int matchIndex);
     
     // OCR
     void setupOcr();

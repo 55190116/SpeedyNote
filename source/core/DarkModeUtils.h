@@ -75,6 +75,14 @@ QColor sourceShade(int slot, bool darkMode);
  */
 QColor sourceAccentColor(int slot, bool darkMode);
 
+/**
+ * @brief Fixed amber accent for search-hit ticks on the enhanced scroll bar.
+ * @param darkMode True for the dark-theme variant.
+ * @return A theme-adjusted amber used for every search tick (Plan SBS3). The
+ *         current match's tick is emphasized by the bar itself (brighter/taller).
+ */
+QColor searchHitColor(bool darkMode);
+
 } // namespace DarkModeUtils
 
 #endif // DARKMODEUTILS_H
