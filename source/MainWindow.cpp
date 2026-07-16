@@ -6260,8 +6260,15 @@ void MainWindow::onSearchMatchFound(const PdfSearchMatch& match,
         vp->setSearchMatches(pageMatches, currentIdx, match.pageIndex);
 
     } else {
-        // Paged match (PdfText or OcrText): pageIndex is a notebook page index
-        vp->scrollToPage(match.pageIndex);
+        // Paged match (PdfText or OcrText): pageIndex is a notebook page index.
+        // SBS1: reveal the match's vertical position instead of parking the page
+        // top; skip scrolling when it's already visible to avoid jarring jumps.
+        const qreal normY = vp->searchMatchPageYFraction(match);
+        if (normY < 0.0) {
+            vp->scrollToPage(match.pageIndex);  // fallback for unmappable sources
+        } else if (!vp->isPagePositionVisible(match.pageIndex, normY)) {
+            vp->scrollToPositionOnPage(match.pageIndex, QPointF(-1.0, normY));
+        }
         vp->setSearchMatches(pageMatches, currentIdx, match.pageIndex);
     }
     

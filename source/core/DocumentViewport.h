@@ -1500,6 +1500,27 @@ public slots:
      * PDF outlines often specify exact positions using normalized coordinates.
      */
     void scrollToPositionOnPage(int pageIndex, QPointF normalizedPosition);
+
+    /**
+     * @brief Page-local Y fraction [0..1] of a search match's center (SBS1).
+     * @param match A search match.
+     * @return Normalized Y within the match's page, or -1 when unavailable
+     *         (invalid page, edgeless/tile source, or degenerate page height).
+     *
+     * Uses the same per-source rect conversion as renderSearchMatchesOverlay
+     * (PdfText scaled by PDF_TO_PAGE_SCALE; OcrText/TextBoxObj already page
+     * coords). Reused by the scroll-bar search markers (SBS3).
+     */
+    qreal searchMatchPageYFraction(const PdfSearchMatch& match) const;
+
+    /**
+     * @brief Whether a page-local Y position is currently visible (SBS1).
+     * @param pageIndex Target page.
+     * @param normY Page-local Y fraction [0..1].
+     * @return True if the corresponding document Y sits within the viewport
+     *         (with a small margin). Vertical only.
+     */
+    bool isPagePositionVisible(int pageIndex, qreal normY) const;
     
     /**
      * @brief Navigate to a specific position on a page identified by UUID.
