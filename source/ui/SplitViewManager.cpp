@@ -622,6 +622,7 @@ void SplitViewManager::destroyScrollBars(Pane pane)
     disconnect(b.cVToView);
     disconnect(b.cHToView);
     disconnect(b.cMarker);
+    disconnect(b.cSearchMarker);
     if (b.fadeTimer) { b.fadeTimer->stop(); delete b.fadeTimer; }
     delete b.vBar;
     delete b.hBar;

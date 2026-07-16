@@ -352,7 +352,11 @@ void ViewportScrollBar::paintEvent(QPaintEvent* /*event*/)
     // ticks. The current Next/Prev match is emphasized (brighter + taller).
     if (isVertical() && !m_searchMarkers.isEmpty()) {
         const QColor amber = DarkModeUtils::searchHitColor(m_darkMode);
-        QColor currentAmber = amber.lighter(m_darkMode ? 115 : 135);
+        QColor normalAmber = amber;
+        normalAmber.setAlpha(220);
+        // Higher-contrast variant for the active match: lighten on the dark
+        // track, deepen on the light track so it pops in either theme.
+        QColor currentAmber = m_darkMode ? amber.lighter(125) : amber.darker(125);
         currentAmber.setAlpha(255);
         const qreal tickInset = 1.5;
         const qreal tickX = tickInset;
@@ -360,7 +364,7 @@ void ViewportScrollBar::paintEvent(QPaintEvent* /*event*/)
         for (const BarMarker& m : mergedSearchMarkers()) {
             const qreal tickH = m.current ? 5.0 : 3.0;
             const qreal y = fractionToPx(m.pos) - tickH / 2.0;
-            p.setBrush(m.current ? currentAmber : amber);
+            p.setBrush(m.current ? currentAmber : normalAmber);
             p.drawRoundedRect(QRectF(tickX, y, tickW, tickH), 1.0, 1.0);
         }
     }
