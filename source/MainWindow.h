@@ -12,8 +12,10 @@
 #include <QPointer>
 #include <QScrollBar>
 #include <QSet>
+#include <QHash>
 #include <set>
 #include <QSpinBox>
+#include "pdf/PdfSearchEngine.h"  // SBS2: PdfSearchMatch complete type for scan aggregate
 #ifdef SPEEDYNOTE_CONTROLLER_SUPPORT
 #include "SDLControllerManager.h"
 #endif
@@ -654,6 +656,11 @@ private:
     PdfSearchBar *m_pdfSearchBar = nullptr;
     PdfSearchEngine *m_searchEngine = nullptr;
     std::unique_ptr<PdfSearchState> m_searchState;
+
+    // SBS2: whole-document streaming scan (live match count + SBS3 marker store)
+    QTimer *m_searchScanDebounce = nullptr;
+    QHash<int, QVector<PdfSearchMatch>> m_searchResultsByPage;
+    int m_searchTotalMatches = 0;
     
     // OCR
     QThread *m_ocrThread = nullptr;
@@ -831,6 +838,11 @@ private:
     void onSearchPrev(const QString& text, bool caseSensitive, bool wholeWord);
     void onSearchMatchFound(const PdfSearchMatch& match, const QVector<PdfSearchMatch>& pageMatches);
     void onSearchNotFound(bool wrapped);
+    // SBS2: live whole-document scan (debounced) + streamed aggregation
+    void onSearchTextChanged(const QString& text);
+    void onSearchScanPage(int pageIndex, const QVector<PdfSearchMatch>& matches);
+    void onSearchScanComplete(int totalMatches);
+    void updateSearchCountStatus();    // Reflect m_searchTotalMatches in the bar
     
     // OCR
     void setupOcr();

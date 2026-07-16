@@ -5997,6 +5997,34 @@ void MainWindow::setupPdfSearch()
             &MainWindow::onSearchMatchFound);
     connect(m_searchEngine, &PdfSearchEngine::notFound, this,
             &MainWindow::onSearchNotFound);
+
+    // SBS2: debounced live whole-document scan driving the match count.
+    m_searchScanDebounce = new QTimer(this);
+    m_searchScanDebounce->setSingleShot(true);
+    m_searchScanDebounce->setInterval(250);
+    connect(m_searchScanDebounce, &QTimer::timeout, this, [this]() {
+        DocumentViewport *vp = currentViewport();
+        if (!vp || !m_searchEngine || !m_pdfSearchBar) {
+            return;
+        }
+        Document *doc = vp->document();
+        if (!doc) {
+            return;
+        }
+        m_searchEngine->setDocument(doc);
+        m_searchResultsByPage.clear();
+        m_searchTotalMatches = 0;
+        m_searchEngine->scanAllPages(m_pdfSearchBar->searchText(),
+                                     m_pdfSearchBar->caseSensitive(),
+                                     m_pdfSearchBar->wholeWord());
+    });
+
+    connect(m_pdfSearchBar, &PdfSearchBar::searchTextChanged, this,
+            &MainWindow::onSearchTextChanged);
+    connect(m_searchEngine, &PdfSearchEngine::pageScanned, this,
+            &MainWindow::onSearchScanPage);
+    connect(m_searchEngine, &PdfSearchEngine::scanComplete, this,
+            &MainWindow::onSearchScanComplete);
     
     // Position at bottom of viewport
     updatePdfSearchBarPosition();
@@ -6066,8 +6094,16 @@ void MainWindow::hidePdfSearchBar()
     // Cancel any ongoing search and clear cache to free memory
     if (m_searchEngine) {
         m_searchEngine->cancel();
+        m_searchEngine->cancelScan();  // SBS2: stop the whole-document scan too
         m_searchEngine->clearCache();
     }
+
+    // SBS2: drop the streamed aggregate + debounce so a reopen starts fresh.
+    if (m_searchScanDebounce) {
+        m_searchScanDebounce->stop();
+    }
+    m_searchResultsByPage.clear();
+    m_searchTotalMatches = 0;
     
     m_pdfSearchBar->hide();
     m_pdfSearchBar->clearStatus();
@@ -6272,8 +6308,8 @@ void MainWindow::onSearchMatchFound(const PdfSearchMatch& match,
         vp->setSearchMatches(pageMatches, currentIdx, match.pageIndex);
     }
     
-    // Clear any previous "not found" status
-    m_pdfSearchBar->clearStatus();
+    // SBS2: keep the whole-document match count visible while navigating.
+    updateSearchCountStatus();
     
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "[MainWindow] Search match found: source=" << static_cast<int>(match.source)
@@ -6286,9 +6322,8 @@ void MainWindow::onSearchNotFound(bool wrapped)
 {
     Q_UNUSED(wrapped)
     
-    if (m_pdfSearchBar) {
-        m_pdfSearchBar->setStatus(tr("No results found"));
-    }
+    // SBS2: reflect the whole-document count (shows "No results found" at zero).
+    updateSearchCountStatus();
     
     // Clear any existing highlights
     if (DocumentViewport *vp = currentViewport()) {
@@ -6303,6 +6338,72 @@ void MainWindow::onSearchNotFound(bool wrapped)
 #ifdef SPEEDYNOTE_DEBUG
     qDebug() << "[MainWindow] Search not found, wrapped:" << wrapped;
 #endif
+}
+
+// ============================================================================
+// SBS2: whole-document streaming scan (live match count)
+// ============================================================================
+
+void MainWindow::onSearchTextChanged(const QString& text)
+{
+    if (!m_searchEngine || !m_pdfSearchBar) {
+        return;
+    }
+
+    // Queries shorter than 2 chars are too broad: cancel + clear rather than
+    // scan the whole document on every keystroke.
+    if (text.trimmed().size() < 2) {
+        m_searchEngine->cancelScan();
+        if (m_searchScanDebounce) {
+            m_searchScanDebounce->stop();
+        }
+        m_searchResultsByPage.clear();
+        m_searchTotalMatches = 0;
+        m_pdfSearchBar->clearStatus();
+        return;
+    }
+
+    // Coalesce rapid typing; the timeout launches the actual scan.
+    if (m_searchScanDebounce) {
+        m_searchScanDebounce->start();
+    }
+}
+
+void MainWindow::onSearchScanPage(int pageIndex, const QVector<PdfSearchMatch>& matches)
+{
+    // A page can only report once per scan, but guard against double-counting
+    // if it somehow re-fires (e.g. overlapping scans).
+    auto it = m_searchResultsByPage.find(pageIndex);
+    if (it != m_searchResultsByPage.end()) {
+        m_searchTotalMatches -= it.value().size();
+    }
+    m_searchResultsByPage.insert(pageIndex, matches);
+    m_searchTotalMatches += matches.size();
+    updateSearchCountStatus();
+}
+
+void MainWindow::onSearchScanComplete(int totalMatches)
+{
+    m_searchTotalMatches = totalMatches;
+    updateSearchCountStatus();
+}
+
+void MainWindow::updateSearchCountStatus()
+{
+    if (!m_pdfSearchBar) {
+        return;
+    }
+    // Only show a status when there is an active query worth scanning.
+    const QString query = m_pdfSearchBar->searchText().trimmed();
+    if (query.size() < 2) {
+        m_pdfSearchBar->clearStatus();
+        return;
+    }
+    if (m_searchTotalMatches <= 0) {
+        m_pdfSearchBar->setStatus(tr("No results found"));
+    } else {
+        m_pdfSearchBar->setStatus(tr("%n match(es)", "", m_searchTotalMatches));
+    }
 }
 
 // =========================================================================

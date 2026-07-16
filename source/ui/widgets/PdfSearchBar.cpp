@@ -149,6 +149,7 @@ void PdfSearchBar::setupUi()
     m_searchInput->setPlaceholderText(tr("Search in PDF..."));
     m_searchInput->setMinimumWidth(110);
     m_searchInput->setClearButtonEnabled(true);
+    connect(m_searchInput, &QLineEdit::textChanged, this, &PdfSearchBar::searchTextChanged);
     layout->addWidget(m_searchInput, 1);  // Stretch
     
     // Status label
@@ -186,10 +187,17 @@ void PdfSearchBar::setupUi()
     m_caseSensitiveAction = m_optionsMenu->addAction(tr("Case Sensitive"));
     m_caseSensitiveAction->setCheckable(true);
     m_caseSensitiveAction->setChecked(false);
+    // SBS2: option changes re-scan the document via the same live-query path.
+    connect(m_caseSensitiveAction, &QAction::toggled, this, [this]() {
+        emit searchTextChanged(searchText());
+    });
     
     m_wholeWordAction = m_optionsMenu->addAction(tr("Whole Word"));
     m_wholeWordAction->setCheckable(true);
     m_wholeWordAction->setChecked(false);
+    connect(m_wholeWordAction, &QAction::toggled, this, [this]() {
+        emit searchTextChanged(searchText());
+    });
     
     m_optionsButton->setMenu(m_optionsMenu);
     

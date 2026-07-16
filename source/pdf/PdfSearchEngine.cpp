@@ -23,6 +23,11 @@
 PdfSearchEngine::PdfSearchEngine(QObject *parent)
     : QObject(parent)
 {
+    // SBS2: pageScanned is emitted from a worker thread, so its arguments must
+    // be registered metatypes for the queued cross-thread connection.
+    qRegisterMetaType<PdfSearchMatch>("PdfSearchMatch");
+    qRegisterMetaType<QVector<PdfSearchMatch>>("QVector<PdfSearchMatch>");
+
     connect(&m_searchWatcher, &QFutureWatcher<void>::finished,
             this, &PdfSearchEngine::onSearchFinished);
     connect(&m_precacheWatcher, &QFutureWatcher<void>::finished,
@@ -32,8 +37,10 @@ PdfSearchEngine::PdfSearchEngine(QObject *parent)
 PdfSearchEngine::~PdfSearchEngine()
 {
     cancel();
+    m_scanCancelled.store(true);
     m_searchWatcher.waitForFinished();
     m_precacheWatcher.waitForFinished();
+    m_scanWatcher.waitForFinished();
 }
 
 void PdfSearchEngine::setDocument(Document *doc)
@@ -41,8 +48,10 @@ void PdfSearchEngine::setDocument(Document *doc)
     if (m_document != doc) {
         // Cancel any ongoing operations before changing document
         cancel();
+        m_scanCancelled.store(true);
         m_searchWatcher.waitForFinished();
         m_precacheWatcher.waitForFinished();
+        m_scanWatcher.waitForFinished();
         
         m_document = doc;
         clearCache();
@@ -59,6 +68,7 @@ void PdfSearchEngine::setDocument(Document *doc)
         // Reset cancellation flags
         m_searchCancelled.store(false);
         m_precacheCancelled.store(false);
+        m_scanCancelled.store(false);
     }
 }
 
@@ -1016,6 +1026,12 @@ void PdfSearchEngine::findNext(const QString& text, bool caseSensitive, bool who
         m_precacheCancelled.store(true);
         m_precacheWatcher.waitForFinished();
         m_precacheCancelled.store(false);
+
+        // SBS2: also stop any in-flight whole-document scan so it cannot read
+        // m_searchText / the cache while we mutate them below.
+        m_scanCancelled.store(true);
+        m_scanWatcher.waitForFinished();
+        m_scanCancelled.store(false);
         
         clearCache();
         m_searchText = text;
@@ -1068,6 +1084,12 @@ void PdfSearchEngine::findPrev(const QString& text, bool caseSensitive, bool who
         m_precacheCancelled.store(true);
         m_precacheWatcher.waitForFinished();
         m_precacheCancelled.store(false);
+
+        // SBS2: also stop any in-flight whole-document scan so it cannot read
+        // m_searchText / the cache while we mutate them below.
+        m_scanCancelled.store(true);
+        m_scanWatcher.waitForFinished();
+        m_scanCancelled.store(false);
         
         clearCache();
         m_searchText = text;
@@ -1102,6 +1124,81 @@ void PdfSearchEngine::findPrev(const QString& text, bool caseSensitive, bool who
         });
         m_searchWatcher.setFuture(future);
     }
+}
+
+// ============================================================================
+// Whole-document streaming scan (SBS2)
+// ============================================================================
+
+void PdfSearchEngine::scanAllPages(const QString& text, bool caseSensitive, bool wholeWord)
+{
+    // Cancel any in-flight scan first.
+    m_scanCancelled.store(true);
+    m_scanWatcher.waitForFinished();
+    m_scanCancelled.store(false);
+
+    // If the query changed, stop every worker before mutating the shared
+    // parameters / cache (workers read m_searchText and m_cache lock-free-ish).
+    if (text != m_searchText || caseSensitive != m_caseSensitive || wholeWord != m_wholeWord) {
+        m_searchCancelled.store(true);
+        m_searchWatcher.waitForFinished();
+        m_searchCancelled.store(false);
+
+        m_precacheCancelled.store(true);
+        m_precacheWatcher.waitForFinished();
+        m_precacheCancelled.store(false);
+
+        clearCache();
+        m_searchText = text;
+        m_caseSensitive = caseSensitive;
+        m_wholeWord = wholeWord;
+    }
+
+    // Edgeless documents are out of scope for page-axis markers (Q13.30).
+    if (!m_document || text.isEmpty() || m_document->isEdgeless()) {
+        emit scanComplete(0);
+        return;
+    }
+
+    // Pre-open every source's provider on the main thread (see findNext()).
+    m_document->ensureAllPdfProvidersLoaded();
+
+    QFuture<void> future = QtConcurrent::run([this]() {
+        doScanAll();
+    });
+    m_scanWatcher.setFuture(future);
+}
+
+void PdfSearchEngine::doScanAll()
+{
+    if (!m_document) {
+        emit scanComplete(0);
+        return;
+    }
+
+    const int totalPages = m_document->pageCount();
+    int total = 0;
+
+    for (int page = 0; page < totalPages; ++page) {
+        if (m_scanCancelled.load()) {
+            return;  // superseded/cancelled: do not emit scanComplete
+        }
+
+        QVector<PdfSearchMatch> matches = getCachedOrSearch(page);
+        total += matches.size();
+        if (!matches.isEmpty()) {
+            emit pageScanned(page, matches);  // queued to the main thread
+        }
+    }
+
+    if (!m_scanCancelled.load()) {
+        emit scanComplete(total);
+    }
+}
+
+void PdfSearchEngine::cancelScan()
+{
+    m_scanCancelled.store(true);
 }
 
 // ============================================================================
