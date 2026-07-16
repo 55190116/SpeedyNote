@@ -79,6 +79,21 @@
 
 
   <releases type="embedded">
+    <release version="1.5.0" date="2026-07-16">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Multi-PDF support: import pages from multiple PDFs into a single document, navigate between them with outline navigation, and export mixed-source PDFs with combined outlines.</li>
+          <li>New per-document settings override panel.</li>
+          <li>New search markers feature for highlighting search results on the viewport.</li>
+          <li>New per-viewport scroll bar with document map and search/LinkObject markers for better navigation and highlighting of search results.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Fixed the search next behavior so that it scrolls the viewport to the next search result and ensures the keyword is in the viewport.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.9" date="2026-07-07">
       <description>
         <p>New Features:</p>
