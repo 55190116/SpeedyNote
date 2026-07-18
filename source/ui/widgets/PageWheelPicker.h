@@ -62,6 +62,13 @@ public:
      * @param dark True for dark mode, false for light mode.
      */
     void setDarkMode(bool dark);
+
+    /**
+     * @brief True while the user is actively driving the wheel (drag, inertia,
+     * or snap animation). Used by SP3 so the floating wheel is not hidden by the
+     * scroll-bar fade timer mid-interaction.
+     */
+    bool isInteracting() const;
     
     /**
      * @brief Get the recommended size for this widget.

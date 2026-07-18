@@ -6,6 +6,7 @@
 #include "TabBar.h"
 #include "TabManager.h"
 #include "widgets/ViewportScrollBar.h"
+#include "widgets/PageWheelPicker.h"  // SP3: floating page-wheel next to the handle
 #include "../core/DocumentViewport.h"
 #include "../core/Document.h"
 #include "../core/DarkModeUtils.h"
@@ -603,6 +604,12 @@ void SplitViewManager::createScrollBars(Pane pane)
     b.vBar->setDarkMode(m_darkMode);
     b.hBar->setDarkMode(m_darkMode);
 
+    // SP3: page-wheel that floats beside the vertical handle. Visibility is driven
+    // by the page-axis bar (see syncPageWheelVisibility); start hidden.
+    b.wheel = new PageWheelPicker(stack);
+    b.wheel->setDarkMode(m_darkMode);
+    b.wheel->setVisible(false);
+
     b.fadeTimer = new QTimer(this);
     b.fadeTimer->setSingleShot(true);
     b.fadeTimer->setInterval(2500);  // ~2.5s of inactivity before fade-out
@@ -627,9 +634,12 @@ void SplitViewManager::destroyScrollBars(Pane pane)
     disconnect(b.cHToView);
     disconnect(b.cMarker);
     disconnect(b.cSearchMarker);
+    disconnect(b.cViewToWheel);
+    disconnect(b.cWheelToView);
     if (b.fadeTimer) { b.fadeTimer->stop(); delete b.fadeTimer; }
     delete b.vBar;
     delete b.hBar;
+    delete b.wheel;
     b = PaneBars{};
 }
 
@@ -669,6 +679,56 @@ void SplitViewManager::repositionScrollBars(Pane pane)
                         thickness);
     b.vBar->raise();
     b.hBar->raise();
+
+    // SP3: keep the floating page-wheel aligned with the (possibly moved) handle.
+    repositionPageWheel(pane);
+}
+
+void SplitViewManager::repositionPageWheel(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (!b.wheel || !b.vBar) return;
+    QStackedWidget* stack = stackForPane(pane);
+    if (!stack) return;
+
+    const int ww = b.wheel->width();
+    const int wh = b.wheel->height();
+    const int gap = 4;
+
+    // Vertical: center the wheel on the handle midpoint, clamped inside the pane.
+    const int handleCenterY = b.vBar->y() + qRound(b.vBar->handleCenterPx());
+    int y = handleCenterY - wh / 2;
+    y = qBound(0, y, qMax(0, stack->height() - wh));
+
+    // Horizontal: sit on the content-facing side of the vertical bar so the wheel
+    // never overlaps the bar itself.
+    int x;
+    if (m_vEdge == ViewportScrollBar::DockEdge::Right) {
+        x = b.vBar->x() - ww - gap;
+    } else {
+        x = b.vBar->x() + b.vBar->width() + gap;
+    }
+    x = qBound(0, x, qMax(0, stack->width() - ww));
+
+    b.wheel->move(x, y);
+    if (b.wheel->isVisible()) b.wheel->raise();
+}
+
+void SplitViewManager::syncPageWheelVisibility(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (!b.wheel) return;
+
+    // The wheel lives and dies with the page-axis bar; edgeless panes never show
+    // either (they have no meaningful page position).
+    const bool visible = b.vBar && b.vBar->isVisible() && !paneIsEdgeless(pane);
+    if (visible) {
+        repositionPageWheel(pane);
+        b.wheel->setVisible(true);
+        b.wheel->raise();
+    } else {
+        b.wheel->setVisible(false);
+    }
 }
 
 void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
@@ -683,8 +743,11 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     disconnect(b.cHToView);
     disconnect(b.cMarker);
     disconnect(b.cSearchMarker);
+    disconnect(b.cViewToWheel);
+    disconnect(b.cWheelToView);
     b.cViewToV = b.cViewToH = b.cVToView = b.cHToView = b.cMarker
-              = b.cSearchMarker = QMetaObject::Connection{};
+              = b.cSearchMarker = b.cViewToWheel = b.cWheelToView
+              = QMetaObject::Connection{};
 
     b.bound = vp;
     if (!vp) return;
@@ -711,7 +774,7 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
         if (!pb.vBar) return;
         refreshHandleSizes(pane);
         pb.vBar->setFraction(f);
-        showScrollBars(pane);  // float in during active scroll
+        showScrollBars(pane);  // float in; also repositions the wheel via sync
     });
     b.cViewToH = connect(vp, &DocumentViewport::horizontalScrollChanged, this,
                          [this, pane](qreal f) {
@@ -727,6 +790,7 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
                          [this, pane](qreal f) {
         PaneBars& pb = m_paneBars[static_cast<int>(pane)];
         if (pb.bound) pb.bound->setVerticalScrollFraction(f);
+        repositionPageWheel(pane);  // SP3: follow the handle during a user drag
     });
     b.cHToView = connect(b.hBar, &ViewportScrollBar::fractionChanged, this,
                          [this, pane](qreal f) {
@@ -749,6 +813,47 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
         if (pb.bound) emit searchMarkerActivated(pb.bound, pageIndex, normY, matchIndex);
     });
 
+    // SP3: initialize the floating page-wheel from the viewport, then wire the
+    // two-way sync. setCurrentPage is guarded with blockSignals so the init and
+    // the viewport->wheel path never echo back into scrollToPage.
+    if (b.wheel) {
+        Document* doc = vp->document();
+        b.wheel->setPageCount(doc ? qMax(1, doc->pageCount()) : 1);
+        b.wheel->blockSignals(true);
+        b.wheel->setCurrentPage(vp->currentPageIndex());
+        b.wheel->blockSignals(false);
+
+        // Viewport -> wheel (programmatic display update; does not feed back).
+        b.cViewToWheel = connect(vp, &DocumentViewport::currentPageChanged, this,
+                                 [this, pane](int p) {
+            PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+            if (!pb.wheel) return;
+            pb.wheel->blockSignals(true);
+            pb.wheel->setCurrentPage(p);
+            pb.wheel->blockSignals(false);
+            repositionPageWheel(pane);
+        });
+
+        // Wheel -> viewport (user drag/wheel; emitted only on snap finish).
+        // scrollToPage does not emit scroll fractions, so re-align the bar handle
+        // from the new pan offset afterwards, then reposition the wheel.
+        b.cWheelToView = connect(b.wheel, &PageWheelPicker::currentPageChanged, this,
+                                 [this, pane](int p) {
+            PaneBars& pb = m_paneBars[static_cast<int>(pane)];
+            if (!pb.bound || !pb.vBar) return;
+            pb.bound->scrollToPage(p);
+
+            DocumentViewport* v = pb.bound;
+            qreal zoom = v->zoomLevel();
+            if (zoom <= 0) zoom = 1.0;
+            const QPointF panOffset = v->panOffset();
+            const QSizeF content = v->totalContentSize();
+            const qreal scrollH = content.height() - v->height() / zoom;
+            pb.vBar->setFraction(scrollH > 0 ? qBound(0.0, panOffset.y() / scrollH, 1.0) : 0.0);
+            repositionPageWheel(pane);
+        });
+    }
+
     // SB2: compute the per-source accent + link-marker document map now.
     updateScrollBarDocumentMap(vp);
 
@@ -759,6 +864,9 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     // Keep the bars above the (possibly newly shown) viewport.
     b.vBar->raise();
     b.hBar->raise();
+
+    // SP3: match the wheel's visibility to the (now-updated) bar visibility.
+    syncPageWheelVisibility(pane);
 }
 
 void SplitViewManager::updateScrollBarDocumentMap(DocumentViewport* vp)
@@ -776,6 +884,11 @@ void SplitViewManager::updateScrollBarDocumentMap(DocumentViewport* vp)
     if (!b.vBar) return;
 
     Document* doc = vp->document();
+
+    // SP3: keep the floating page-wheel's range current across add/insert/delete/
+    // import (MainWindow calls this on page-structure changes).
+    if (b.wheel) b.wheel->setPageCount(doc ? qMax(1, doc->pageCount()) : 1);
+
     if (!doc) {
         b.vBar->setAccentRegions({});
         b.vBar->setMarkers({});
@@ -973,6 +1086,8 @@ void SplitViewManager::applyEdgelessVisibility(Pane pane)
         b.vBar->setVisible(false);
         b.hBar->setVisible(false);
     }
+
+    syncPageWheelVisibility(pane);  // SP3: wheel tracks the page-axis bar
 }
 
 void SplitViewManager::showScrollBars(Pane pane)
@@ -986,6 +1101,8 @@ void SplitViewManager::showScrollBars(Pane pane)
     if (!b.vBar->isVisible()) { b.vBar->setVisible(true); b.vBar->raise(); }
     if (!b.hBar->isVisible()) { b.hBar->setVisible(true); b.hBar->raise(); }
 
+    syncPageWheelVisibility(pane);  // SP3: float the wheel in with the bar
+
     // When pinned, the bars stay up; otherwise (re)start the fade timer.
     if (m_scrollBarsPinned) {
         if (b.fadeTimer) b.fadeTimer->stop();
@@ -998,11 +1115,20 @@ void SplitViewManager::hideScrollBars(Pane pane)
 {
     if (m_scrollBarsPinned) return;
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
-    // Never hide while the user is actively dragging a handle.
-    if (b.vBar && b.vBar->isDragging()) return;
-    if (b.hBar && b.hBar->isDragging()) return;
+    // Never hide while the user is actively driving a handle or the page-wheel.
+    // Re-arm the fade timer instead of just bailing: the wheel path navigates via
+    // scrollToPage, which emits no scroll signal to re-arm it, so without this the
+    // bars + wheel could linger visible after a wheel interaction.
+    const bool busy = (b.vBar && b.vBar->isDragging())
+                   || (b.hBar && b.hBar->isDragging())
+                   || (b.wheel && b.wheel->isInteracting());
+    if (busy) {
+        if (b.fadeTimer) b.fadeTimer->start();
+        return;
+    }
     if (b.vBar) b.vBar->setVisible(false);
     if (b.hBar) b.hBar->setVisible(false);
+    syncPageWheelVisibility(pane);  // SP3: hide the wheel with the bar
 }
 
 void SplitViewManager::applyScrollBarDarkMode()
@@ -1010,6 +1136,7 @@ void SplitViewManager::applyScrollBarDarkMode()
     for (int i = 0; i < 2; ++i) {
         if (m_paneBars[i].vBar) m_paneBars[i].vBar->setDarkMode(m_darkMode);
         if (m_paneBars[i].hBar) m_paneBars[i].hBar->setDarkMode(m_darkMode);
+        if (m_paneBars[i].wheel) m_paneBars[i].wheel->setDarkMode(m_darkMode);  // SP3
         // SB2 accent colors are theme-dependent, so recompute the document map.
         if (m_paneBars[i].bound) updateScrollBarDocumentMap(m_paneBars[i].bound);
     }

@@ -128,7 +128,11 @@ qreal ViewportScrollBar::handleLengthPx() const
     const qreal track = trackLength();
     if (track <= 0.0) return 0.0;
     qreal len = m_handleFraction * track;
-    len = qBound(static_cast<qreal>(kMinHandlePx), len, track);
+    // Clamp the minimum against the track: on a very short track (e.g. before the
+    // widget has been laid out) kMinHandlePx can exceed the track, which would
+    // make qBound's min > max and abort. Never let the min exceed the track.
+    const qreal minLen = qMin(static_cast<qreal>(kMinHandlePx), track);
+    len = qBound(minLen, len, track);
     return len;
 }
 
@@ -138,6 +142,11 @@ qreal ViewportScrollBar::handleStartPx() const
     const qreal handle = handleLengthPx();
     const qreal travel = qMax(0.0, track - handle);
     return trackMargin() + m_fraction * travel;
+}
+
+qreal ViewportScrollBar::handleCenterPx() const
+{
+    return handleStartPx() + handleLengthPx() / 2.0;
 }
 
 qreal ViewportScrollBar::posAlongAxis(const QPointF& p) const

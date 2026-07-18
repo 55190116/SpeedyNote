@@ -74,6 +74,10 @@ public:
 
     bool isDragging() const { return m_dragging; }
 
+    // Handle midpoint along the major axis in bar-local pixels. Used by the
+    // controller (SP3) to float the page-wheel next to the handle.
+    qreal handleCenterPx() const;
+
     // The fixed thickness of the bar along its minor axis.
     static int barThickness() { return 16; }
 
