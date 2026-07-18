@@ -1479,8 +1479,11 @@ public slots:
     /**
      * @brief Set the pan offset.
      * @param offset New pan offset in document coordinates.
+     * @param steppedScroll True when the move comes from a discrete mouse-wheel
+     *        step (see onScrollActivity()); false for continuous scroll sources
+     *        (scroll-bar drag, touchpad pixel-delta, programmatic pans).
      */
-    void setPanOffset(QPointF offset);
+    void setPanOffset(QPointF offset, bool steppedScroll = false);
     
     /**
      * @brief Scroll to make a specific page visible.
@@ -1611,8 +1614,9 @@ public slots:
     /**
      * @brief Scroll by a delta amount.
      * @param delta Scroll delta in document coordinates.
+     * @param steppedScroll True for a discrete mouse-wheel step (see setPanOffset).
      */
-    void scrollBy(QPointF delta);
+    void scrollBy(QPointF delta, bool steppedScroll = false);
     
     /**
      * @brief Zoom to fit the entire document in the viewport.
@@ -2862,8 +2866,15 @@ private:
      * @brief Mark the immediate-pan route as actively scrolling (SP1).
      * Sets m_scrollActive and restarts the settle timer. Cheap; called on
      * every wheel/touchpad/scroll-bar event instead of preloading/evicting.
+     *
+     * @param steppedScroll True for a discrete mouse-wheel step. On the Qt5
+     *        build such steps skip the SP2 "cache-only while scrolling" gate so
+     *        the freshly revealed page renders synchronously (its pre-SP2, and
+     *        still instant, behavior) instead of flashing blank until the settle
+     *        timer fires. Continuous sources (scroll-bar drag, touchpad) keep
+     *        the deferred path. On Qt6 this flag is ignored (behavior unchanged).
      */
-    void onScrollActivity();
+    void onScrollActivity(bool steppedScroll = false);
 
     /**
      * @brief Run the deferred housekeeping once scrolling has settled (SP1).
