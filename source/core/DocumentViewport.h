@@ -1655,6 +1655,13 @@ public slots:
      * @param fraction Scroll fraction.
      */
     void setVerticalScrollFraction(qreal fraction);
+
+    /**
+     * @brief True while the immediate-pan route (wheel/touchpad/scroll-bar) is
+     * actively scrolling, i.e. within SCROLL_SETTLE_MS of the last scroll event.
+     * Used to defer heavy housekeeping (and, in SP2, synchronous rendering).
+     */
+    bool isScrolling() const { return m_scrollActive; }
     
     /**
      * @brief Emit scroll fraction signals for current state.
@@ -2654,6 +2661,14 @@ private:
     QTimer* m_pdfPreloadTimer = nullptr;  ///< Debounce timer for preload requests
     QList<QFutureWatcher<QImage>*> m_activePdfWatchers;  ///< Active async render operations (returns QImage for thread safety)
     static constexpr int PDF_PRELOAD_DELAY_MS = 150;   ///< Debounce delay (ms) before preloading
+
+    // ===== Scroll-activity gate (SP1) =====
+    // The immediate-pan route (wheel/touchpad/scroll-bar) marks itself active on
+    // every event and restarts m_scrollSettleTimer; when it fires we run the
+    // deferred housekeeping (preload/evict) once instead of on every event.
+    QTimer* m_scrollSettleTimer = nullptr;  ///< Fires SCROLL_SETTLE_MS after the last scroll event
+    bool m_scrollActive = false;            ///< True while actively scrolling (see isScrolling())
+    static constexpr int SCROLL_SETTLE_MS = 120;  ///< Idle delay (ms) before deferred housekeeping runs
     
     // ===== Page Layout Cache (Performance: O(1) page position lookup) =====
     mutable QVector<qreal> m_pageYCache;  ///< Cached Y position for each page (single column)
@@ -2823,6 +2838,13 @@ private:
      * @return Cached or freshly rendered pixmap (may be null if not a PDF page).
      */
     QPixmap getCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi);
+
+    /**
+     * @brief Cache-only PDF page lookup (SP2).
+     * Returns the cached pixmap, or a null QPixmap on a miss. Never renders, so
+     * it is safe to call on the paint path while scrolling (see isScrolling()).
+     */
+    QPixmap lookupCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi) const;
     
     /**
      * @brief Request PDF preload (debounced).
@@ -2835,6 +2857,20 @@ private:
      * Called by timer after debounce delay. Runs in background threads.
      */
     void doAsyncPdfPreload();
+
+    /**
+     * @brief Mark the immediate-pan route as actively scrolling (SP1).
+     * Sets m_scrollActive and restarts the settle timer. Cheap; called on
+     * every wheel/touchpad/scroll-bar event instead of preloading/evicting.
+     */
+    void onScrollActivity();
+
+    /**
+     * @brief Run the deferred housekeeping once scrolling has settled (SP1).
+     * Fired by m_scrollSettleTimer: recompute cache capacity, async-preload,
+     * preload stroke caches, and evict distant tiles.
+     */
+    void onScrollSettled();
     
     /**
      * @brief Invalidate the entire PDF cache.
