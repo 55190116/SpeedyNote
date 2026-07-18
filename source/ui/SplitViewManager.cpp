@@ -963,6 +963,7 @@ void SplitViewManager::applyEdgelessVisibility(Pane pane)
         b.vBar->setVisible(false);
         b.hBar->setVisible(false);
     } else if (m_scrollBarsPinned) {
+        if (b.fadeTimer) b.fadeTimer->stop();  // pinned bars never fade
         b.vBar->setVisible(true);
         b.hBar->setVisible(true);
         b.vBar->raise();
@@ -1026,16 +1027,9 @@ void SplitViewManager::setScrollBarsPinned(bool pinned)
         PaneBars& b = m_paneBars[i];
         if (!b.vBar) continue;
         if (pinned) {
-            // Edgeless panes stay hidden even when pinned.
-            if (paneIsEdgeless(static_cast<Pane>(i))) {
-                if (b.fadeTimer) b.fadeTimer->stop();
-                continue;
-            }
-            if (b.fadeTimer) b.fadeTimer->stop();
-            b.vBar->setVisible(true);
-            b.hBar->setVisible(true);
-            b.vBar->raise();
-            b.hBar->raise();
+            // Show for paged panes; edgeless panes stay hidden (single source
+            // of truth for the pinned/edgeless decision).
+            applyEdgelessVisibility(static_cast<Pane>(i));
         } else if (b.fadeTimer) {
             b.fadeTimer->start();  // begin fading the currently-shown bars
         }
