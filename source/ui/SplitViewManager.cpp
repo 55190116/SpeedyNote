@@ -720,8 +720,13 @@ void SplitViewManager::syncPageWheelVisibility(Pane pane)
     if (!b.wheel) return;
 
     // The wheel lives and dies with the page-axis bar; edgeless panes never show
-    // either (they have no meaningful page position).
-    const bool visible = b.vBar && b.vBar->isVisible() && !paneIsEdgeless(pane);
+    // either (they have no meaningful page position). It is also suppressed when
+    // the left-docked page-panel action bar (which hosts its own wheel) is shown
+    // and the vertical bar is on the left, to avoid a duplicate/overlap (SP3).
+    const bool actionBarConflict =
+        m_pagePanelActionBarShown && (m_vEdge == ViewportScrollBar::DockEdge::Left);
+    const bool visible = b.vBar && b.vBar->isVisible()
+                      && !paneIsEdgeless(pane) && !actionBarConflict;
     if (visible) {
         repositionPageWheel(pane);
         b.wheel->setVisible(true);
@@ -799,10 +804,16 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     });
 
     // SB2: clicking a link marker jumps the bound viewport to that page.
+    // scrollToPage emits no scroll fractions, so re-align the handle afterwards
+    // (otherwise the tick jumps the page but the handle stays put).
     b.cMarker = connect(b.vBar, &ViewportScrollBar::markerActivated, this,
                         [this, pane](int pageIndex) {
         PaneBars& pb = m_paneBars[static_cast<int>(pane)];
-        if (pb.bound && pageIndex >= 0) pb.bound->scrollToPage(pageIndex);
+        if (pb.bound && pageIndex >= 0) {
+            pb.bound->scrollToPage(pageIndex);
+            realignVerticalBarToViewport(pane);
+            repositionPageWheel(pane);
+        }
     });
 
     // SBS3: forward a search-tick click up to MainWindow (tagged with the vp)
@@ -842,14 +853,7 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
             PaneBars& pb = m_paneBars[static_cast<int>(pane)];
             if (!pb.bound || !pb.vBar) return;
             pb.bound->scrollToPage(p);
-
-            DocumentViewport* v = pb.bound;
-            qreal zoom = v->zoomLevel();
-            if (zoom <= 0) zoom = 1.0;
-            const QPointF panOffset = v->panOffset();
-            const QSizeF content = v->totalContentSize();
-            const qreal scrollH = content.height() - v->height() / zoom;
-            pb.vBar->setFraction(scrollH > 0 ? qBound(0.0, panOffset.y() / scrollH, 1.0) : 0.0);
+            realignVerticalBarToViewport(pane);
             repositionPageWheel(pane);
         });
     }
@@ -1060,6 +1064,22 @@ void SplitViewManager::refreshHandleSizes(Pane pane)
     b.hBar->setHandleFraction(qBound(0.0, viewW / content.width(), 1.0));
 }
 
+void SplitViewManager::realignVerticalBarToViewport(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    DocumentViewport* vp = b.bound;
+    if (!vp || !b.vBar) return;
+
+    qreal zoom = vp->zoomLevel();
+    if (zoom <= 0) zoom = 1.0;
+    const QPointF panOffset = vp->panOffset();
+    const QSizeF content = vp->totalContentSize();
+    const qreal scrollH = content.height() - vp->height() / zoom;
+    // setFraction is a silent display update (no fractionChanged), so it never
+    // feeds back into setVerticalScrollFraction.
+    b.vBar->setFraction(scrollH > 0 ? qBound(0.0, panOffset.y() / scrollH, 1.0) : 0.0);
+}
+
 bool SplitViewManager::paneIsEdgeless(Pane pane) const
 {
     const DocumentViewport* vp = m_paneBars[static_cast<int>(pane)].bound;
@@ -1177,6 +1197,18 @@ void SplitViewManager::setScrollBarVerticalEdge(ViewportScrollBar::DockEdge edge
     for (int i = 0; i < 2; ++i) {
         if (m_paneBars[i].vBar) m_paneBars[i].vBar->setDockEdge(edge);
         repositionScrollBars(static_cast<Pane>(i));
+        // SP3: moving to/from the left edge changes the action-bar conflict.
+        syncPageWheelVisibility(static_cast<Pane>(i));
+    }
+}
+
+void SplitViewManager::setPagePanelActionBarShown(bool shown)
+{
+    if (m_pagePanelActionBarShown == shown) return;
+    m_pagePanelActionBarShown = shown;
+    // Only affects the floating page-wheel; re-evaluate it for both panes.
+    for (int i = 0; i < 2; ++i) {
+        syncPageWheelVisibility(static_cast<Pane>(i));
     }
 }
 

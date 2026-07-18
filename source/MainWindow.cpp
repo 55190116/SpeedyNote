@@ -7740,6 +7740,15 @@ void MainWindow::updatePagePanelActionBarVisibility()
     // Update action bar position after visibility change to ensure correct placement
     updateActionBarPosition();
     
+    // SP3: the page-panel action bar hosts its own page-wheel and docks on the
+    // left; tell the split-view manager so it can suppress the floating page-wheel
+    // when the vertical scroll bar is also on the left (avoids a duplicate/overlap).
+    const bool actionBarShown =
+        documentHasPages && (panelActive || m_pagePanelActionBar->isLocked());
+    if (m_splitViewManager) {
+        m_splitViewManager->setPagePanelActionBarShown(actionBarShown);
+    }
+    
     // Sync action bar state when bar will be shown
     if (documentHasPages && (panelActive || m_pagePanelActionBar->isLocked())) {
         if (DocumentViewport* vp = currentViewport()) {

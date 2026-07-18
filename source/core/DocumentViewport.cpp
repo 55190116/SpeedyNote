@@ -1020,7 +1020,7 @@ void DocumentViewport::setZoomLevel(qreal zoom)
     emitScrollFractions();
 }
 
-void DocumentViewport::setPanOffset(QPointF offset)
+void DocumentViewport::setPanOffset(QPointF offset, bool steppedScroll)
 {
     // Pan in flight: suspend the focus cache (see setZoomLevel for rationale).
     if (m_focusRebuildTimer) {
@@ -1040,12 +1040,27 @@ void DocumentViewport::setPanOffset(QPointF offset)
     // SP1: defer the heavy housekeeping (PDF preload, stroke-cache preload, tile
     // eviction) to onScrollSettled() so it runs once ~SCROLL_SETTLE_MS after the
     // user stops scrolling instead of on every wheel/touchpad event.
-    onScrollActivity();
+    onScrollActivity(steppedScroll);
 }
 
-void DocumentViewport::onScrollActivity()
+void DocumentViewport::onScrollActivity(bool steppedScroll)
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    // Qt6: behavior unchanged - always gate rendering to cache-only while
+    // scrolling (SP2). The discrete-step distinction below is Qt5-only.
+    Q_UNUSED(steppedScroll);
     m_scrollActive = true;
+#else
+    // Qt5: a discrete mouse-wheel step renders synchronously (its pre-SP2, still
+    // instant, behavior). Under SP2 the cache-only-while-scrolling gate leaves
+    // the newly revealed page blank until the settle timer fires ~SCROLL_SETTLE_MS
+    // later; on the Qt5 build the adjacent-page async preload does not fill the
+    // cache in time, so every notch flashes blank and stalls. Do NOT mark the
+    // stepped route active so paintEvent takes the synchronous getCachedPdfPage
+    // path. Continuous sources (scroll-bar drag, touchpad pixel-delta) keep the
+    // deferred cache-only path. Heavy housekeeping stays deferred either way.
+    m_scrollActive = steppedScroll ? false : true;
+#endif
     if (m_scrollSettleTimer) {
         m_scrollSettleTimer->start();
     }
@@ -1450,9 +1465,9 @@ bool DocumentViewport::applyRestoredEdgelessPosition()
     return true;
 }
 
-void DocumentViewport::scrollBy(QPointF delta)
+void DocumentViewport::scrollBy(QPointF delta, bool steppedScroll)
 {
-    setPanOffset(m_panOffset + delta);
+    setPanOffset(m_panOffset + delta, steppedScroll);
 }
 
 void DocumentViewport::zoomToFit()
@@ -3156,8 +3171,13 @@ void DocumentViewport::wheelEvent(QWheelEvent* event)
             return;
         }
         
-        // Plain wheel (no modifier) → Immediate scroll (unchanged behavior)
-        scrollBy(scrollDelta);
+        // Plain wheel (no modifier) → Immediate scroll (unchanged behavior).
+        // A discrete mouse wheel reports angleDelta (no pixelDelta); a touchpad
+        // reports pixelDelta as a high-frequency stream. Flag the discrete wheel
+        // as a "stepped" scroll so the Qt5 build renders it synchronously instead
+        // of flashing blank (see onScrollActivity). Qt6 ignores the flag.
+        const bool steppedWheel = pixelDelta.isNull() && !angleDelta.isNull();
+        scrollBy(scrollDelta, steppedWheel);
     }
     
     event->accept();
