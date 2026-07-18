@@ -4009,10 +4009,8 @@ QPixmap DocumentViewport::getCachedPdfPage(const QString& sourceId, int pageInde
     
     // Cache miss - render synchronously (for visible pages that MUST be shown).
     // This should only happen on first paint of a new page (settled state).
-    // Keep the mutex released during the expensive render; relock() below when
-    // inserting into the cache.
-    QMutexLocker locker(&m_pdfCacheMutex);
-    locker.unlock();
+    // The expensive render runs without holding the cache mutex; we lock only
+    // to insert the result below.
     
 #ifdef SPEEDYNOTE_DEBUG
     // Build cache contents string for debug
@@ -4048,7 +4046,7 @@ QPixmap DocumentViewport::getCachedPdfPage(const QString& sourceId, int pageInde
     QPixmap pixmap = QPixmap::fromImage(pdfImage);
     
     // Add to cache (thread-safe)
-    locker.relock();
+    QMutexLocker locker(&m_pdfCacheMutex);
     
     // Double-check it wasn't added by another thread while we were rendering
     for (const PdfCacheEntry& entry : m_pdfCache) {
