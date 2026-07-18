@@ -95,6 +95,13 @@ void PageWheelPicker::setDarkMode(bool dark)
     }
 }
 
+bool PageWheelPicker::isInteracting() const
+{
+    return m_dragging
+        || (m_inertiaTimer && m_inertiaTimer->isActive())
+        || (m_snapAnimation && m_snapAnimation->state() == QAbstractAnimation::Running);
+}
+
 QSize PageWheelPicker::sizeHint() const
 {
     return QSize(WIDGET_WIDTH, WIDGET_HEIGHT);

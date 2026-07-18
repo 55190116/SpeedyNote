@@ -26,6 +26,7 @@ class Document;
 class DocumentViewport;
 class QStackedWidget;
 class QTimer;
+class PageWheelPicker;   // SP3: floating page-wheel next to the page-axis handle
 struct PdfSearchMatch;  // SBS3: search-hit results feed the scroll-bar markers
 
 class SplitViewManager : public QWidget {
@@ -226,6 +227,7 @@ private:
     struct PaneBars {
         ViewportScrollBar* vBar = nullptr;   // page axis (vertical), docked left
         ViewportScrollBar* hBar = nullptr;   // cross axis (horizontal), docked top
+        PageWheelPicker* wheel = nullptr;    // SP3: floats beside the vertical handle
         QTimer* fadeTimer = nullptr;
         QPointer<DocumentViewport> bound;
         QMetaObject::Connection cViewToV;
@@ -234,6 +236,8 @@ private:
         QMetaObject::Connection cHToView;
         QMetaObject::Connection cMarker;   // SB2: vBar markerActivated -> scrollToPage
         QMetaObject::Connection cSearchMarker;  // SBS3: vBar searchMarkerActivated -> forward
+        QMetaObject::Connection cViewToWheel;   // SP3: viewport currentPageChanged -> wheel
+        QMetaObject::Connection cWheelToView;   // SP3: wheel currentPageChanged -> scrollToPage
     };
 
     QStackedWidget* stackForPane(Pane pane) const;
@@ -242,6 +246,9 @@ private:
     void destroyScrollBars(Pane pane);
     void repositionScrollBars(Pane pane);
     void bindScrollBars(Pane pane, DocumentViewport* vp);
+    // SP3: float the page-wheel next to the vertical handle / track its visibility.
+    void repositionPageWheel(Pane pane);
+    void syncPageWheelVisibility(Pane pane);
     void refreshHandleSizes(Pane pane);
     void showScrollBars(Pane pane);
     void hideScrollBars(Pane pane);
