@@ -2838,6 +2838,13 @@ private:
      * @return Cached or freshly rendered pixmap (may be null if not a PDF page).
      */
     QPixmap getCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi);
+
+    /**
+     * @brief Cache-only PDF page lookup (SP2).
+     * Returns the cached pixmap, or a null QPixmap on a miss. Never renders, so
+     * it is safe to call on the paint path while scrolling (see isScrolling()).
+     */
+    QPixmap lookupCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi) const;
     
     /**
      * @brief Request PDF preload (debounced).

@@ -3978,25 +3978,41 @@ bool DocumentViewport::event(QEvent* event)
 
 // ===== PDF Cache Helpers (Task 1.3.6) =====
 
+QPixmap DocumentViewport::lookupCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi) const
+{
+    if (!m_document) {
+        return QPixmap();
+    }
+
+    // Thread-safe cache lookup. Never renders (SP2): safe on the paint path
+    // while scrolling.
+    QMutexLocker locker(&m_pdfCacheMutex);
+    for (const PdfCacheEntry& entry : m_pdfCache) {
+        if (entry.matches(sourceId, pageIndex, dpi)) {
+            return entry.pixmap;  // Cache hit
+        }
+    }
+    return QPixmap();  // Miss - caller decides whether to render synchronously
+}
+
 QPixmap DocumentViewport::getCachedPdfPage(const QString& sourceId, int pageIndex, qreal dpi)
 {
     if (!m_document) {
         return QPixmap();
     }
     
-    // Thread-safe cache lookup
-    QMutexLocker locker(&m_pdfCacheMutex);
-    
-    // Check if we have this page cached at the right DPI (and source)
-    for (const PdfCacheEntry& entry : m_pdfCache) {
-        if (entry.matches(sourceId, pageIndex, dpi)) {
-            return entry.pixmap;  // Cache hit - fast path
-        }
+    // Fast path: return the cached pixmap if present (no render).
+    QPixmap cached = lookupCachedPdfPage(sourceId, pageIndex, dpi);
+    if (!cached.isNull()) {
+        return cached;
     }
     
-    // Cache miss - render synchronously (for visible pages that MUST be shown)
-    // This should only happen on first paint of a new page
-    locker.unlock();  // Release mutex during expensive render
+    // Cache miss - render synchronously (for visible pages that MUST be shown).
+    // This should only happen on first paint of a new page (settled state).
+    // Keep the mutex released during the expensive render; relock() below when
+    // inserting into the cache.
+    QMutexLocker locker(&m_pdfCacheMutex);
+    locker.unlock();
     
 #ifdef SPEEDYNOTE_DEBUG
     // Build cache contents string for debug
@@ -14267,7 +14283,13 @@ void DocumentViewport::renderPage(QPainter& painter, Page* page, int pageIndex)
                 const int resolvedPage = m_document->resolveSourcePageIndex(page->pdfSourceId, page->pdfPageNumber);
                 if (prov && prov->isValid() && resolvedPage >= 0 && resolvedPage < prov->pageCount()) {
                     qreal dpi = effectivePdfDpi();
-                    QPixmap pdfPixmap = getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
+                    // SP2: never render synchronously while scrolling - draw the
+                    // cached pixmap if present, else fall back to the page
+                    // background (already filled above). The settle handler
+                    // renders the final visible pages once scrolling stops.
+                    QPixmap pdfPixmap = isScrolling()
+                        ? lookupCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi)
+                        : getCachedPdfPage(page->pdfSourceId, page->pdfPageNumber, dpi);
                     
                     if (!pdfPixmap.isNull()) {
                         // Scale pixmap to fit page rect
