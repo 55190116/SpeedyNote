@@ -804,10 +804,16 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     });
 
     // SB2: clicking a link marker jumps the bound viewport to that page.
+    // scrollToPage emits no scroll fractions, so re-align the handle afterwards
+    // (otherwise the tick jumps the page but the handle stays put).
     b.cMarker = connect(b.vBar, &ViewportScrollBar::markerActivated, this,
                         [this, pane](int pageIndex) {
         PaneBars& pb = m_paneBars[static_cast<int>(pane)];
-        if (pb.bound && pageIndex >= 0) pb.bound->scrollToPage(pageIndex);
+        if (pb.bound && pageIndex >= 0) {
+            pb.bound->scrollToPage(pageIndex);
+            realignVerticalBarToViewport(pane);
+            repositionPageWheel(pane);
+        }
     });
 
     // SBS3: forward a search-tick click up to MainWindow (tagged with the vp)
@@ -847,14 +853,7 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
             PaneBars& pb = m_paneBars[static_cast<int>(pane)];
             if (!pb.bound || !pb.vBar) return;
             pb.bound->scrollToPage(p);
-
-            DocumentViewport* v = pb.bound;
-            qreal zoom = v->zoomLevel();
-            if (zoom <= 0) zoom = 1.0;
-            const QPointF panOffset = v->panOffset();
-            const QSizeF content = v->totalContentSize();
-            const qreal scrollH = content.height() - v->height() / zoom;
-            pb.vBar->setFraction(scrollH > 0 ? qBound(0.0, panOffset.y() / scrollH, 1.0) : 0.0);
+            realignVerticalBarToViewport(pane);
             repositionPageWheel(pane);
         });
     }
@@ -1063,6 +1062,22 @@ void SplitViewManager::refreshHandleSizes(Pane pane)
     const qreal viewH = vp->height() / zoom;
     b.vBar->setHandleFraction(qBound(0.0, viewH / content.height(), 1.0));
     b.hBar->setHandleFraction(qBound(0.0, viewW / content.width(), 1.0));
+}
+
+void SplitViewManager::realignVerticalBarToViewport(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    DocumentViewport* vp = b.bound;
+    if (!vp || !b.vBar) return;
+
+    qreal zoom = vp->zoomLevel();
+    if (zoom <= 0) zoom = 1.0;
+    const QPointF panOffset = vp->panOffset();
+    const QSizeF content = vp->totalContentSize();
+    const qreal scrollH = content.height() - vp->height() / zoom;
+    // setFraction is a silent display update (no fractionChanged), so it never
+    // feeds back into setVerticalScrollFraction.
+    b.vBar->setFraction(scrollH > 0 ? qBound(0.0, panOffset.y() / scrollH, 1.0) : 0.0);
 }
 
 bool SplitViewManager::paneIsEdgeless(Pane pane) const

@@ -261,6 +261,10 @@ private:
     void repositionPageWheel(Pane pane);
     void syncPageWheelVisibility(Pane pane);
     void refreshHandleSizes(Pane pane);
+    // Silently re-align the vertical handle to the bound viewport's current pan
+    // offset. Needed after scrollToPage() (which emits no scroll fractions), e.g.
+    // when a link marker or the page-wheel jumps to a page.
+    void realignVerticalBarToViewport(Pane pane);
     void showScrollBars(Pane pane);
     void hideScrollBars(Pane pane);
     // Edgeless documents have no meaningful scroll bar; force-hide it regardless
