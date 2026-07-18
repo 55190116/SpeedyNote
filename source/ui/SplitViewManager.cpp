@@ -720,8 +720,13 @@ void SplitViewManager::syncPageWheelVisibility(Pane pane)
     if (!b.wheel) return;
 
     // The wheel lives and dies with the page-axis bar; edgeless panes never show
-    // either (they have no meaningful page position).
-    const bool visible = b.vBar && b.vBar->isVisible() && !paneIsEdgeless(pane);
+    // either (they have no meaningful page position). It is also suppressed when
+    // the left-docked page-panel action bar (which hosts its own wheel) is shown
+    // and the vertical bar is on the left, to avoid a duplicate/overlap (SP3).
+    const bool actionBarConflict =
+        m_pagePanelActionBarShown && (m_vEdge == ViewportScrollBar::DockEdge::Left);
+    const bool visible = b.vBar && b.vBar->isVisible()
+                      && !paneIsEdgeless(pane) && !actionBarConflict;
     if (visible) {
         repositionPageWheel(pane);
         b.wheel->setVisible(true);
@@ -1177,6 +1182,18 @@ void SplitViewManager::setScrollBarVerticalEdge(ViewportScrollBar::DockEdge edge
     for (int i = 0; i < 2; ++i) {
         if (m_paneBars[i].vBar) m_paneBars[i].vBar->setDockEdge(edge);
         repositionScrollBars(static_cast<Pane>(i));
+        // SP3: moving to/from the left edge changes the action-bar conflict.
+        syncPageWheelVisibility(static_cast<Pane>(i));
+    }
+}
+
+void SplitViewManager::setPagePanelActionBarShown(bool shown)
+{
+    if (m_pagePanelActionBarShown == shown) return;
+    m_pagePanelActionBarShown = shown;
+    // Only affects the floating page-wheel; re-evaluate it for both panes.
+    for (int i = 0; i < 2; ++i) {
+        syncPageWheelVisibility(static_cast<Pane>(i));
     }
 }
 

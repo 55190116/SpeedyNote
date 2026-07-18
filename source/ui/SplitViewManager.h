@@ -148,6 +148,17 @@ public:
     ViewportScrollBar::DockEdge scrollBarHorizontalEdge() const { return m_hEdge; }
 
     /**
+     * @brief Tell the manager whether the page-panel action bar (which hosts its
+     *        own page-wheel, docked on the LEFT of the viewport) is currently
+     *        shown (SP3).
+     *
+     * When it is shown AND the vertical scroll bar is docked Left, the floating
+     * page-wheel would duplicate/overlap it, so it is suppressed. MainWindow
+     * calls this whenever the action bar's visibility changes.
+     */
+    void setPagePanelActionBarShown(bool shown);
+
+    /**
      * @brief Reserve @p px at the bottom of each pane so a bottom-docked
      *        cross-axis bar clears the Ctrl+F search bar (Plan SB4).
      *
@@ -291,4 +302,8 @@ private:
     ViewportScrollBar::DockEdge m_hEdge = ViewportScrollBar::DockEdge::Top;
     // Bottom space reserved for the search bar (SB4); shifts a bottom-docked hBar up.
     int m_bottomInset = 0;
+
+    // SP3: page-panel action bar (left-docked, has its own wheel) currently shown.
+    // Suppresses the floating page-wheel when the vertical bar is also on the left.
+    bool m_pagePanelActionBarShown = false;
 };
