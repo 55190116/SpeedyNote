@@ -752,6 +752,10 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
     // SB2: compute the per-source accent + link-marker document map now.
     updateScrollBarDocumentMap(vp);
 
+    // Force-hide in edgeless mode; otherwise restore the correct paged
+    // visibility (pinned -> shown, unpinned -> hidden/float) for this pane.
+    applyEdgelessVisibility(pane);
+
     // Keep the bars above the (possibly newly shown) viewport.
     b.vBar->raise();
     b.hBar->raise();
@@ -943,8 +947,39 @@ void SplitViewManager::refreshHandleSizes(Pane pane)
     b.hBar->setHandleFraction(qBound(0.0, viewW / content.width(), 1.0));
 }
 
+bool SplitViewManager::paneIsEdgeless(Pane pane) const
+{
+    const DocumentViewport* vp = m_paneBars[static_cast<int>(pane)].bound;
+    return vp && vp->document() && vp->document()->isEdgeless();
+}
+
+void SplitViewManager::applyEdgelessVisibility(Pane pane)
+{
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    if (!b.vBar || !b.hBar) return;
+
+    if (paneIsEdgeless(pane)) {
+        if (b.fadeTimer) b.fadeTimer->stop();
+        b.vBar->setVisible(false);
+        b.hBar->setVisible(false);
+    } else if (m_scrollBarsPinned) {
+        if (b.fadeTimer) b.fadeTimer->stop();  // pinned bars never fade
+        b.vBar->setVisible(true);
+        b.hBar->setVisible(true);
+        b.vBar->raise();
+        b.hBar->raise();
+    } else {
+        // Not pinned, not edgeless: leave hidden and float in on demand.
+        b.vBar->setVisible(false);
+        b.hBar->setVisible(false);
+    }
+}
+
 void SplitViewManager::showScrollBars(Pane pane)
 {
+    // Edgeless documents never show the scroll bar (overrides pin/proximity/scroll).
+    if (paneIsEdgeless(pane)) return;
+
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
     if (!b.vBar || !b.hBar) return;
 
@@ -992,11 +1027,9 @@ void SplitViewManager::setScrollBarsPinned(bool pinned)
         PaneBars& b = m_paneBars[i];
         if (!b.vBar) continue;
         if (pinned) {
-            if (b.fadeTimer) b.fadeTimer->stop();
-            b.vBar->setVisible(true);
-            b.hBar->setVisible(true);
-            b.vBar->raise();
-            b.hBar->raise();
+            // Show for paged panes; edgeless panes stay hidden (single source
+            // of truth for the pinned/edgeless decision).
+            applyEdgelessVisibility(static_cast<Pane>(i));
         } else if (b.fadeTimer) {
             b.fadeTimer->start();  // begin fading the currently-shown bars
         }

@@ -245,6 +245,10 @@ private:
     void refreshHandleSizes(Pane pane);
     void showScrollBars(Pane pane);
     void hideScrollBars(Pane pane);
+    // Edgeless documents have no meaningful scroll bar; force-hide it regardless
+    // of the pinned setting / proximity / scroll floats.
+    bool paneIsEdgeless(Pane pane) const;
+    void applyEdgelessVisibility(Pane pane);
     void applyScrollBarDarkMode();
     void proximityFloatCheck(QEvent* event);
     void checkPaneProximity(Pane pane, const QPointF& globalPos);
