@@ -79,6 +79,20 @@
 
 
   <releases type="embedded">
+    <release version="1.5.1" date="2026-07-18">
+      <description>
+        <p>New Features:</p>
+        <ul>
+          <li>Page wheel picker is now positioned right next to the handle on the scroll bar to be more accessible.</li>
+        </ul>
+        <p>Bug Fixes and Improvements:</p>
+        <ul>
+          <li>Vastly improved the scrolling performance of the viewport with non-blocking PDF rendering during scrolls.</li>
+          <li>Made the scroll bars hidden in edgeless mode.</li>
+          <li>Fixed the problem that the viewport scroll bar handle was not updated when the user clicks on a color marker of a LinkObject.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-07-16">
       <description>
         <p>New Features:</p>
