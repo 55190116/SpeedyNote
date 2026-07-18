@@ -183,6 +183,13 @@ DocumentViewport::DocumentViewport(QWidget* parent)
     m_pdfPreloadTimer = new QTimer(this);
     m_pdfPreloadTimer->setSingleShot(true);
     connect(m_pdfPreloadTimer, &QTimer::timeout, this, &DocumentViewport::doAsyncPdfPreload);
+
+    // Scroll-settle timer (SP1) - defers heavy housekeeping (preload/evict) until
+    // the immediate-pan route (wheel/touchpad/scroll-bar) stops for a beat.
+    m_scrollSettleTimer = new QTimer(this);
+    m_scrollSettleTimer->setSingleShot(true);
+    m_scrollSettleTimer->setInterval(SCROLL_SETTLE_MS);
+    connect(m_scrollSettleTimer, &QTimer::timeout, this, &DocumentViewport::onScrollSettled);
     
     // Gesture timeout timer - fallback for detecting gesture end (zoom or pan)
     m_gestureTimeoutTimer = new QTimer(this);
@@ -1030,17 +1037,37 @@ void DocumentViewport::setPanOffset(QPointF offset)
     emit panChanged(m_panOffset);
     emitScrollFractions();
     
-    // Preload PDF cache for adjacent pages after scroll (Task: PDF Performance Fix)
-    // Safe here because scroll is user-initiated, not during rapid stroke drawing
+    // SP1: defer the heavy housekeeping (PDF preload, stroke-cache preload, tile
+    // eviction) to onScrollSettled() so it runs once ~SCROLL_SETTLE_MS after the
+    // user stops scrolling instead of on every wheel/touchpad event.
+    onScrollActivity();
+}
+
+void DocumentViewport::onScrollActivity()
+{
+    m_scrollActive = true;
+    if (m_scrollSettleTimer) {
+        m_scrollSettleTimer->start();
+    }
+}
+
+void DocumentViewport::onScrollSettled()
+{
+    m_scrollActive = false;
+    if (!m_document) {
+        return;
+    }
+
+    // Visible pages may have changed while scrolling: resize the cache first,
+    // then preload adjacent pages (async, debounced) and reclaim memory.
+    updatePdfCacheCapacity();
     preloadPdfCache();
-    
-    // MEMORY FIX: Evict stroke caches for distant pages after scroll
-    // This prevents unbounded memory growth when scrolling through large documents
     preloadStrokeCaches();
-    
-    // EDGELESS MEMORY FIX: Evict tiles that are far from visible area
-    // This saves dirty tiles to disk and removes them from memory (Phase E5)
     evictDistantTiles();
+
+    // Final clean repaint (matters in SP2, where painting draws cache-only
+    // while scrolling and needs one repaint to show freshly rendered pages).
+    update();
 }
 
 void DocumentViewport::scrollToPage(int pageIndex)
@@ -1588,6 +1615,8 @@ void DocumentViewport::setHorizontalScrollFraction(qreal fraction)
         clampPanOffset();
         emit panChanged(m_panOffset);
         update();
+        // SP1: scroll-bar route defers preload/evict to the settle timer too.
+        onScrollActivity();
     }
 }
 
@@ -1618,6 +1647,8 @@ void DocumentViewport::setVerticalScrollFraction(qreal fraction)
         updateCurrentPageIndex();
         emit panChanged(m_panOffset);
         update();
+        // SP1: scroll-bar route defers preload/evict to the settle timer too.
+        onScrollActivity();
     }
 }
 
