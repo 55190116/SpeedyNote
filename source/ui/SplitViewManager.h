@@ -235,11 +235,16 @@ private:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
     // --- Enhanced scroll bars (SB1) ---
+    // The two bars float in / fade out independently, so each axis has its own
+    // trigger (proximity / wheel) and its own fade timer.
+    enum class BarAxis { Vertical, Horizontal };
+
     struct PaneBars {
         ViewportScrollBar* vBar = nullptr;   // page axis (vertical), docked left
         ViewportScrollBar* hBar = nullptr;   // cross axis (horizontal), docked top
         PageWheelPicker* wheel = nullptr;    // SP3: floats beside the vertical handle
-        QTimer* fadeTimer = nullptr;
+        QTimer* vFadeTimer = nullptr;        // fades the vertical (page-axis) bar
+        QTimer* hFadeTimer = nullptr;        // fades the horizontal (cross-axis) bar
         QPointer<DocumentViewport> bound;
         QMetaObject::Connection cViewToV;
         QMetaObject::Connection cViewToH;
@@ -265,6 +270,12 @@ private:
     // offset. Needed after scrollToPage() (which emits no scroll fractions), e.g.
     // when a link marker or the page-wheel jumps to a page.
     void realignVerticalBarToViewport(Pane pane);
+    // Per-axis float-in / fade-out: proximity to one edge or a wheel scroll along
+    // one axis triggers only that bar. The page-wheel (SP3) tracks the vertical
+    // axis only.
+    void showScrollBar(Pane pane, BarAxis axis);
+    void hideScrollBar(Pane pane, BarAxis axis);
+    // Both-axis convenience wrappers (used by the pinned/edgeless paths).
     void showScrollBars(Pane pane);
     void hideScrollBars(Pane pane);
     // Edgeless documents have no meaningful scroll bar; force-hide it regardless

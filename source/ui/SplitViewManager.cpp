@@ -610,11 +610,18 @@ void SplitViewManager::createScrollBars(Pane pane)
     b.wheel->setDarkMode(m_darkMode);
     b.wheel->setVisible(false);
 
-    b.fadeTimer = new QTimer(this);
-    b.fadeTimer->setSingleShot(true);
-    b.fadeTimer->setInterval(2500);  // ~2.5s of inactivity before fade-out
-    connect(b.fadeTimer, &QTimer::timeout, this, [this, pane]() {
-        hideScrollBars(pane);
+    // Independent fade timers so each axis hides on its own inactivity.
+    b.vFadeTimer = new QTimer(this);
+    b.vFadeTimer->setSingleShot(true);
+    b.vFadeTimer->setInterval(2500);  // ~2.5s of inactivity before fade-out
+    connect(b.vFadeTimer, &QTimer::timeout, this, [this, pane]() {
+        hideScrollBar(pane, BarAxis::Vertical);
+    });
+    b.hFadeTimer = new QTimer(this);
+    b.hFadeTimer->setSingleShot(true);
+    b.hFadeTimer->setInterval(2500);
+    connect(b.hFadeTimer, &QTimer::timeout, this, [this, pane]() {
+        hideScrollBar(pane, BarAxis::Horizontal);
     });
 
     // Initial visibility follows the pin state.
@@ -636,7 +643,8 @@ void SplitViewManager::destroyScrollBars(Pane pane)
     disconnect(b.cSearchMarker);
     disconnect(b.cViewToWheel);
     disconnect(b.cWheelToView);
-    if (b.fadeTimer) { b.fadeTimer->stop(); delete b.fadeTimer; }
+    if (b.vFadeTimer) { b.vFadeTimer->stop(); delete b.vFadeTimer; }
+    if (b.hFadeTimer) { b.hFadeTimer->stop(); delete b.hFadeTimer; }
     delete b.vBar;
     delete b.hBar;
     delete b.wheel;
@@ -778,16 +786,23 @@ void SplitViewManager::bindScrollBars(Pane pane, DocumentViewport* vp)
         PaneBars& pb = m_paneBars[static_cast<int>(pane)];
         if (!pb.vBar) return;
         refreshHandleSizes(pane);
+        // emitScrollFractions() always emits both axes, so a pure horizontal pan
+        // re-emits the vertical fraction unchanged. Only float the vertical bar in
+        // when the page axis actually moved.
+        const bool changed = !qFuzzyCompare(f + 1.0, pb.vBar->fraction() + 1.0);
         pb.vBar->setFraction(f);
-        showScrollBars(pane);  // float in; also repositions the wheel via sync
+        if (changed) showScrollBar(pane, BarAxis::Vertical);
     });
     b.cViewToH = connect(vp, &DocumentViewport::horizontalScrollChanged, this,
                          [this, pane](qreal f) {
         PaneBars& pb = m_paneBars[static_cast<int>(pane)];
         if (!pb.hBar) return;
         refreshHandleSizes(pane);
+        // Only float the horizontal bar in when the cross axis actually moved, so a
+        // pure vertical pan (plain/backtick wheel) never summons it.
+        const bool changed = !qFuzzyCompare(f + 1.0, pb.hBar->fraction() + 1.0);
         pb.hBar->setFraction(f);
-        showScrollBars(pane);
+        if (changed) showScrollBar(pane, BarAxis::Horizontal);
     });
 
     // Bar -> viewport (user interaction only).
@@ -1092,11 +1107,13 @@ void SplitViewManager::applyEdgelessVisibility(Pane pane)
     if (!b.vBar || !b.hBar) return;
 
     if (paneIsEdgeless(pane)) {
-        if (b.fadeTimer) b.fadeTimer->stop();
+        if (b.vFadeTimer) b.vFadeTimer->stop();
+        if (b.hFadeTimer) b.hFadeTimer->stop();
         b.vBar->setVisible(false);
         b.hBar->setVisible(false);
     } else if (m_scrollBarsPinned) {
-        if (b.fadeTimer) b.fadeTimer->stop();  // pinned bars never fade
+        if (b.vFadeTimer) b.vFadeTimer->stop();  // pinned bars never fade
+        if (b.hFadeTimer) b.hFadeTimer->stop();
         b.vBar->setVisible(true);
         b.hBar->setVisible(true);
         b.vBar->raise();
@@ -1110,45 +1127,60 @@ void SplitViewManager::applyEdgelessVisibility(Pane pane)
     syncPageWheelVisibility(pane);  // SP3: wheel tracks the page-axis bar
 }
 
-void SplitViewManager::showScrollBars(Pane pane)
+void SplitViewManager::showScrollBar(Pane pane, BarAxis axis)
 {
     // Edgeless documents never show the scroll bar (overrides pin/proximity/scroll).
     if (paneIsEdgeless(pane)) return;
 
     PaneBars& b = m_paneBars[static_cast<int>(pane)];
-    if (!b.vBar || !b.hBar) return;
+    ViewportScrollBar* bar = (axis == BarAxis::Vertical) ? b.vBar : b.hBar;
+    QTimer* timer = (axis == BarAxis::Vertical) ? b.vFadeTimer : b.hFadeTimer;
+    if (!bar) return;
 
-    if (!b.vBar->isVisible()) { b.vBar->setVisible(true); b.vBar->raise(); }
-    if (!b.hBar->isVisible()) { b.hBar->setVisible(true); b.hBar->raise(); }
+    if (!bar->isVisible()) { bar->setVisible(true); bar->raise(); }
 
-    syncPageWheelVisibility(pane);  // SP3: float the wheel in with the bar
+    // SP3: the page-wheel floats with the vertical (page-axis) bar only.
+    if (axis == BarAxis::Vertical) syncPageWheelVisibility(pane);
 
-    // When pinned, the bars stay up; otherwise (re)start the fade timer.
+    // When pinned, the bar stays up; otherwise (re)start this axis's fade timer.
     if (m_scrollBarsPinned) {
-        if (b.fadeTimer) b.fadeTimer->stop();
-    } else if (b.fadeTimer) {
-        b.fadeTimer->start();
+        if (timer) timer->stop();
+    } else if (timer) {
+        timer->start();
     }
+}
+
+void SplitViewManager::hideScrollBar(Pane pane, BarAxis axis)
+{
+    if (m_scrollBarsPinned) return;
+    PaneBars& b = m_paneBars[static_cast<int>(pane)];
+    ViewportScrollBar* bar = (axis == BarAxis::Vertical) ? b.vBar : b.hBar;
+    QTimer* timer = (axis == BarAxis::Vertical) ? b.vFadeTimer : b.hFadeTimer;
+
+    // Never hide while the user is actively driving this axis's handle (or, for
+    // the vertical axis, the page-wheel). Re-arm the fade timer instead of just
+    // bailing: the wheel path navigates via scrollToPage, which emits no scroll
+    // signal to re-arm it, so without this the bar + wheel could linger visible.
+    const bool busy = (bar && bar->isDragging())
+                   || (axis == BarAxis::Vertical && b.wheel && b.wheel->isInteracting());
+    if (busy) {
+        if (timer) timer->start();
+        return;
+    }
+    if (bar) bar->setVisible(false);
+    if (axis == BarAxis::Vertical) syncPageWheelVisibility(pane);  // SP3: hide wheel with bar
+}
+
+void SplitViewManager::showScrollBars(Pane pane)
+{
+    showScrollBar(pane, BarAxis::Vertical);
+    showScrollBar(pane, BarAxis::Horizontal);
 }
 
 void SplitViewManager::hideScrollBars(Pane pane)
 {
-    if (m_scrollBarsPinned) return;
-    PaneBars& b = m_paneBars[static_cast<int>(pane)];
-    // Never hide while the user is actively driving a handle or the page-wheel.
-    // Re-arm the fade timer instead of just bailing: the wheel path navigates via
-    // scrollToPage, which emits no scroll signal to re-arm it, so without this the
-    // bars + wheel could linger visible after a wheel interaction.
-    const bool busy = (b.vBar && b.vBar->isDragging())
-                   || (b.hBar && b.hBar->isDragging())
-                   || (b.wheel && b.wheel->isInteracting());
-    if (busy) {
-        if (b.fadeTimer) b.fadeTimer->start();
-        return;
-    }
-    if (b.vBar) b.vBar->setVisible(false);
-    if (b.hBar) b.hBar->setVisible(false);
-    syncPageWheelVisibility(pane);  // SP3: hide the wheel with the bar
+    hideScrollBar(pane, BarAxis::Vertical);
+    hideScrollBar(pane, BarAxis::Horizontal);
 }
 
 void SplitViewManager::applyScrollBarDarkMode()
@@ -1177,8 +1209,10 @@ void SplitViewManager::setScrollBarsPinned(bool pinned)
             // Show for paged panes; edgeless panes stay hidden (single source
             // of truth for the pinned/edgeless decision).
             applyEdgelessVisibility(static_cast<Pane>(i));
-        } else if (b.fadeTimer) {
-            b.fadeTimer->start();  // begin fading the currently-shown bars
+        } else {
+            // Begin fading the currently-shown bars (each axis independently).
+            if (b.vFadeTimer) b.vFadeTimer->start();
+            if (b.hFadeTimer) b.hFadeTimer->start();
         }
     }
 }
@@ -1280,7 +1314,7 @@ void SplitViewManager::checkPaneProximity(Pane pane, const QPointF& globalPos)
     const bool nearHEdge = (m_hEdge == ViewportScrollBar::DockEdge::Bottom)
                                ? (local.y() >= h - threshold)
                                : (local.y() <= threshold);
-    if (nearVEdge || nearHEdge) {
-        showScrollBars(pane);
-    }
+    // Proximity to one edge floats in only that axis's bar, independently.
+    if (nearVEdge) showScrollBar(pane, BarAxis::Vertical);
+    if (nearHEdge) showScrollBar(pane, BarAxis::Horizontal);
 }
