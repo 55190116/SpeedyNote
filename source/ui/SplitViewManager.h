@@ -275,9 +275,6 @@ private:
     // axis only.
     void showScrollBar(Pane pane, BarAxis axis);
     void hideScrollBar(Pane pane, BarAxis axis);
-    // Both-axis convenience wrappers (used by the pinned/edgeless paths).
-    void showScrollBars(Pane pane);
-    void hideScrollBars(Pane pane);
     // Edgeless documents have no meaningful scroll bar; force-hide it regardless
     // of the pinned setting / proximity / scroll floats.
     bool paneIsEdgeless(Pane pane) const;

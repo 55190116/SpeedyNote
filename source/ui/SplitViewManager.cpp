@@ -1171,18 +1171,6 @@ void SplitViewManager::hideScrollBar(Pane pane, BarAxis axis)
     if (axis == BarAxis::Vertical) syncPageWheelVisibility(pane);  // SP3: hide wheel with bar
 }
 
-void SplitViewManager::showScrollBars(Pane pane)
-{
-    showScrollBar(pane, BarAxis::Vertical);
-    showScrollBar(pane, BarAxis::Horizontal);
-}
-
-void SplitViewManager::hideScrollBars(Pane pane)
-{
-    hideScrollBar(pane, BarAxis::Vertical);
-    hideScrollBar(pane, BarAxis::Horizontal);
-}
-
 void SplitViewManager::applyScrollBarDarkMode()
 {
     for (int i = 0; i < 2; ++i) {
